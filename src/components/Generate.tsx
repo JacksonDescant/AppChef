@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Sparkles, Copy, Check, Wifi, WifiOff, ChevronRight,
-  FileDown, Link, Loader2, Bookmark, BookmarkCheck, Trash2, FileText,
+  FileDown, Link, Loader2, Bookmark, BookmarkCheck, Trash2, FileText, RefreshCw,
 } from 'lucide-react'
 import { useSection } from '../hooks/useSection'
 import { useSettings } from '../hooks/useSettings'
 import { streamCompletion, checkConnection } from '../llm'
-import { SYSTEM_PROMPT, buildUserMessage, enforceChronologicalOrder } from '../prompts'
+import { SYSTEM_PROMPT, buildUserMessage, buildRefineMessage, enforceChronologicalOrder, stripCitations } from '../prompts'
 import { Button, Card } from './ui'
 import type { Job, EducationEntry, Project, Skill, SavedResume, Profile } from '../types'
 
@@ -45,6 +45,7 @@ export default function Generate() {
   const [pdfLoading, setPdfLoading] = useState(false)
   const [justSaved, setJustSaved] = useState(false)
   const [connected, setConnected] = useState<boolean | null>(null)
+  const [refineInstructions, setRefineInstructions] = useState('')
 
   // Live PDF preview
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null)
@@ -121,7 +122,39 @@ export default function Generate() {
       setError(e instanceof Error ? e.message : 'Failed to connect to model server.')
       setConnected(false)
     } finally {
-      setOutput(prev => enforceChronologicalOrder(prev))
+      setOutput(prev => stripCitations(enforceChronologicalOrder(prev)))
+      setLoading(false)
+      setStreaming(false)
+    }
+  }
+
+  async function refine() {
+    if (!output.trim()) return
+    if (!jobDescription.trim()) { setError('Job description required to refine.'); return }
+    setError(''); setJustSaved(false); setLoading(true); setStreaming(true)
+    const snapshot = output
+    setOutput('')
+    try {
+      const userMessage = buildRefineMessage(
+        { jobs, education, projects, skills },
+        profile,
+        jobDescription,
+        snapshot,
+        refineInstructions,
+      )
+      const gen = streamCompletion({
+        endpoint: settings.llamaEndpoint, model: settings.modelName,
+        messages: [{ role: 'user', content: userMessage }],
+        temperature: settings.temperature, maxTokens: settings.maxTokens,
+        system: SYSTEM_PROMPT,
+      })
+      for await (const chunk of gen) setOutput(prev => prev + chunk)
+    } catch (e) {
+      setOutput(snapshot)
+      setError(e instanceof Error ? e.message : 'Failed to connect to model server.')
+      setConnected(false)
+    } finally {
+      setOutput(prev => stripCitations(enforceChronologicalOrder(prev)))
       setLoading(false)
       setStreaming(false)
     }
@@ -267,6 +300,28 @@ export default function Generate() {
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-orange-400 animate-pulse" />
                   Generating…
                 </p>
+              )}
+              {!streaming && (
+                <div className="mt-4 pt-4 border-t border-zinc-800/60">
+                  <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Refine</p>
+                  <div className="flex gap-2">
+                    <input
+                      value={refineInstructions}
+                      onChange={e => setRefineInstructions(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && !loading && refine()}
+                      placeholder="What should change? (leave blank to auto-improve bullets)"
+                      className="flex-1 h-8 rounded-lg border border-zinc-700 bg-zinc-900 px-3 text-sm text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-orange-500/50 transition-colors"
+                    />
+                    <button
+                      onClick={refine}
+                      disabled={loading || connected !== true}
+                      className="flex items-center gap-1.5 px-3 h-8 rounded-lg text-xs font-medium bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+                    >
+                      <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+                      {loading ? 'Refining…' : 'Refine'}
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           )}

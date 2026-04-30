@@ -15,13 +15,13 @@ OUTPUT FORMAT:
 [SECTION]WORK EXPERIENCE
 [JOB_CO]Company Name\tCity, State
 [JOB_ROLE]Job Title\tMM/YYYY – MM/YYYY (or "Present" instead of the end date. Always include the start date)
-[BULLET]Concise achievement-focused bullet, one line max
-(2–3 bullets per job; most recent first; omit or trim irrelevant jobs)
+[BULLET]Achievement-focused bullet reframed from candidate's source data [S1]
+(minimum 2 bullets per job, up to 3 for recent/high-relevance roles; most recent first; omit irrelevant jobs entirely rather than giving them fewer than 2 bullets)
 
 [SECTION]PROJECTS
 [PROJECT]Project Name\tMM/YYYY – MM/YYYY
-[BULLET]What you built and its measurable impact
-(2–3 bullets per project; most relevant projects only)
+[BULLET]What you built and its measurable impact [S2]
+(minimum 2 bullets per project; most relevant projects only; omit a project entirely rather than giving it fewer than 2 bullets)
 
 [SECTION]TECHNICAL SKILLS
 [SKILL]Category: skill1, skill2, skill3
@@ -30,15 +30,16 @@ OUTPUT FORMAT:
 RULES:
 1. Use ONLY the tagged lines above. No other text or blank lines between tags.
 2. The \\t in two-column lines is a literal tab character separating left content from right content.
-3. Bullets must be concise — one line each. Quantify impact wherever the data supports it.
-4. CRITICAL — Do NOT copy the candidate's bullet points verbatim. Read the job description carefully, identify what the employer values most, then write entirely NEW bullets that reframe the candidate's experience to emphasize those priorities. Synthesize; do not regurgitate.
+3. Bullets must be concise — one line each. Quantify impact wherever the source data supports it.
+4. GROUNDING — CITATIONS REQUIRED: Every [BULLET] line must end with a citation tag: [S1] for a single source, [S1,S3] when synthesizing across multiple. The numbers correspond to [S#] labels in the candidate's profile data. If a bullet draws from an entry's Description field (not a numbered bullet), use [Sdesc]. Citations are stripped from the final resume output — they exist only to enforce factual grounding. You MAY: reframe and strengthen language, change emphasis to match the role, synthesize across multiple source bullets, and highlight the natural significance and implications of the candidate's actual work — even if the source phrasing is plain. You MAY NOT: introduce specific numbers, metrics, team sizes, dollar figures, dates, or concrete outcomes that are not present in the cited source(s). If source [S2] says "improved performance", you may write "drove critical performance improvements [S2]" — but NOT "improved performance by 40% [S2]" unless 40% appears in [S2].
 5. Mirror keywords and technical terms from the job description naturally and truthfully.
 6. ORDERING IS MANDATORY: every section must appear in strict reverse-chronological order by END DATE — most recent end date first. "Present" is the most recent possible end date. This cannot be changed for any reason, including relevance to the job. Recency weighting affects bullet count and detail, not the order entries appear. The candidate's entries are pre-sorted — output them in the EXACT ORDER they are provided.
 7. The entire output must represent one page of content — be selective and concise but always use the full page.
 8. Never fabricate or exaggerate. Reframe truthfully to match the role.
-9. NEVER invent, modify, or estimate any date. Copy dates exactly as given in the candidate's profile data. If a date was not provided, omit it entirely rather than guessing.`
+9. NEVER invent, modify, or estimate any date. Copy dates exactly as given in the candidate's profile data. If a date was not provided, omit it entirely rather than guessing.
+10. MINIMUM BULLETS: Every work experience entry and every project entry that appears in the resume MUST have at least 2 [BULLET] lines. If page space is tight, drop an entire entry rather than leaving any entry with only 1 bullet.`
 
-interface ResumeData {
+export interface ResumeData {
   jobs: Job[]
   education: EducationEntry[]
   projects: Project[]
@@ -120,13 +121,19 @@ function bulletBudget(nJobs: number, nEdus: number, nProjects: number, nSkillCat
   return Math.max(4, Math.floor((usable - fixed) / PDF.bullet * 0.80) + 2)
 }
 
-export function buildUserMessage(
-  data: ResumeData,
-  profile: Profile | null,
-  jobDescription: string,
-): string {
+function groupSkillsByCategory(skills: Skill[]): Record<string, string[]> {
+  return skills.reduce<Record<string, string[]>>((acc, s) => {
+    const cat = s.category || 'General'
+    if (!acc[cat]) acc[cat] = []
+    acc[cat].push(s.level ? `${s.name} (${s.level})` : s.name)
+    return acc
+  }, {})
+}
+
+function buildProfileContext(data: ResumeData, profile: Profile | null): string {
   const { jobs, education, projects, skills } = data
   const sections: string[] = []
+  let sourceIdx = 1
 
   if (profile) {
     const lines = [
@@ -152,10 +159,14 @@ export function buildUserMessage(
         const loc = j.location ? ` | ${j.location}` : ''
         const recency = recencyLabel(j.endDate, j.current)
         const tag = recency ? ` [${recency}]` : ''
+        const bulletLines = j.bullets?.trim()
+          ? j.bullets.split('\n').map(l => l.trim()).filter(Boolean)
+          : []
+        const numberedBullets = bulletLines.map(l => `[S${sourceIdx++}] ${l}`).join('\n')
         return [
           `[#${i + 1}] ${j.title} at ${j.company}${loc} (${dates})${tag}`,
           j.description && `Description: ${j.description}`,
-          parseBullets(j.bullets),
+          numberedBullets || undefined,
         ].filter(Boolean).join('\n')
       }).join('\n\n')
     )
@@ -188,22 +199,20 @@ export function buildUserMessage(
         const dates = start && end ? ` (${start} – ${end})` : start ? ` (${start})` : ''
         const tech = p.technologies ? ` | Technologies: ${p.technologies}` : ''
         const url = p.url ? ` | URL: ${p.url}` : ''
+        const bulletLines = p.bullets?.trim()
+          ? p.bullets.split('\n').map(l => l.trim()).filter(Boolean)
+          : []
+        const numberedBullets = bulletLines.map(l => `[S${sourceIdx++}] ${l}`).join('\n')
         return [
           `[#${i + 1}] ${p.name}${dates}${tech}${url}`,
           p.description && `Description: ${p.description}`,
-          parseBullets(p.bullets),
+          numberedBullets || undefined,
         ].filter(Boolean).join('\n')
       }).join('\n\n')
     )
   }
 
-  const byCategory = skills.reduce<Record<string, string[]>>((acc, s) => {
-    const cat = s.category || 'General'
-    if (!acc[cat]) acc[cat] = []
-    acc[cat].push(s.level ? `${s.name} (${s.level})` : s.name)
-    return acc
-  }, {})
-
+  const byCategory = groupSkillsByCategory(skills)
   if (skills.length > 0) {
     sections.push(
       '## SKILLS\n' +
@@ -211,29 +220,76 @@ export function buildUserMessage(
     )
   }
 
+  return sections.join('\n\n')
+}
+
+function pageFillInstruction(data: ResumeData): string {
+  const byCategory = groupSkillsByCategory(data.skills)
   const budget = bulletBudget(
-    jobs.length,
-    education.length,
-    projects.length,
+    data.jobs.length,
+    data.education.length,
+    data.projects.length,
     Object.keys(byCategory).length,
   )
-
+  const minRequired = 2 * (data.jobs.length + data.projects.length)
+  const effective = Math.max(budget, minRequired)
   return (
-    `Here is the candidate's full profile:\n\n${sections.join('\n\n')}\n\n` +
-    `---\n\nTarget job description:\n\n${jobDescription}\n\n` +
-    `---\n\n` +
-    `PAGE FILL REQUIREMENT: Based on the layout, this resume has space for exactly ${budget} bullet points ` +
+    `PAGE FILL REQUIREMENT: Based on the layout, this resume has space for exactly ${effective} bullet points ` +
     `across all work experience and project entries combined. You MUST write exactly that many [BULLET] lines — ` +
     `no more (it will overflow the page) and no fewer (it will leave blank space). ` +
-    `Distribute the ${budget} bullets across entries with more bullets going to recent/relevant positions.\n\n` +
+    `Every entry that appears must receive at least 2 bullets. ` +
+    `Distribute remaining bullets to recent/relevant positions.`
+  )
+}
+
+export function buildUserMessage(
+  data: ResumeData,
+  profile: Profile | null,
+  jobDescription: string,
+): string {
+  const profileContext = buildProfileContext(data, profile)
+  return (
+    `Here is the candidate's full profile:\n\n${profileContext}\n\n` +
+    `---\n\nTarget job description:\n\n${jobDescription}\n\n` +
+    `---\n\n` +
+    `${pageFillInstruction(data)}\n\n` +
     `Write the tailored resume in the exact tagged format specified.`
   )
 }
 
-function parseBullets(text: string): string {
-  if (!text?.trim()) return ''
-  return text.split('\n').map(l => l.trim()).filter(Boolean).map(l => `• ${l}`).join('\n')
+export function buildRefineMessage(
+  data: ResumeData,
+  profile: Profile | null,
+  jobDescription: string,
+  currentResume: string,
+  instructions: string,
+): string {
+  const profileContext = buildProfileContext(data, profile)
+  const refinementNote = instructions.trim()
+    || 'Improve the quality of all bullets — ensure every entry has at least 2 strong, specific bullets tightly aligned with the job description. Strengthen weak bullets with more concrete impact and relevant keywords.'
+  return (
+    `Here is the candidate's full profile:\n\n${profileContext}\n\n` +
+    `---\n\nTarget job description:\n\n${jobDescription}\n\n` +
+    `---\n\nCurrent resume draft to refine:\n\n${currentResume}\n\n` +
+    `---\n\nRefinement instructions: ${refinementNote}\n\n` +
+    `---\n\n` +
+    `${pageFillInstruction(data)}\n\n` +
+    `Output the complete revised resume in the exact tagged format. Preserve everything that works well and improve what doesn't.`
+  )
 }
+
+// Strips [S1], [S1,S3], [Sdesc] citation tags the model appends to bullets for grounding.
+export function stripCitations(text: string): string {
+  return text
+    .split('\n')
+    .map(line =>
+      line.startsWith('[BULLET]')
+        ? line.replace(/\s*\[S(?:desc|\d+)(?:[,\s]+S(?:desc|\d+))*\]\s*$/, '')
+        : line
+    )
+    .join('\n')
+}
+
 
 // ─── Post-processing: enforce chronological order ────────────────────────────
 // Deterministic fallback — re-sorts WORK EXPERIENCE, EDUCATION, and PROJECTS
