@@ -1,5 +1,7 @@
 import type { Job, EducationEntry, Project, Skill, Profile } from './types'
 
+export const SELECTION_SYSTEM_PROMPT = `You are a resume strategist. Your only job is to select which of the candidate's work experiences and projects are most relevant for a specific job posting. Return ONLY a valid JSON object — no explanation, no preamble, no markdown fences.`
+
 export const SYSTEM_PROMPT = `You are an expert resume writer and career strategist. Produce a tailored, one-page resume using ONLY the exact tagged format below. Output nothing else — no preamble, no explanation, no markdown fences.
 
 OUTPUT FORMAT:
@@ -91,21 +93,22 @@ function formatDate(val: string): string {
 }
 
 // ─── Page budget calculator ───────────────────────────────────────────────────
-// Mirrors PDF renderer constants (MT=40, MB=36, FS=10, LG=1.0). Values in pts.
-// Constants are intentionally conservative: section headers include their
-// preceding moveDown, skill rows assume likely wrapping, and a 0.80 safety
-// factor covers bullets that wrap to a second line.
+// Approximates the LaTeX renderer (Jake's Resume template, server/latex.ts):
+// letterpaper with 0.5in side margins, 11pt Computer Modern (~13.6pt lines).
+// The hard one-page guarantee lives server-side (squeeze presets + content
+// drops in server/tectonic.ts); this budget only needs to be close enough
+// that the LLM writes roughly the right amount and drops rarely fire.
 const PDF = {
-  pageH: 792, mt: 40, mb: 36,
-  header: 44,       // name + contact + gap
-  sectionHdr: 20,   // bold title + rule + gap + preceding moveDown
-  eduEntry: 30,     // EDU_INST + EDU_DEG (two ~15pt lines)
-  eduGap: 5,        // gap between edu entries
-  jobHdr: 30,       // JOB_CO + JOB_ROLE
-  jobGap: 5,        // moveDown before each job
-  projectHdr: 25,   // PROJECT row + gap
-  skillRow: 18,     // one SKILL line (generous for wrapping)
-  bullet: 14,       // one BULLET line (generous for wrapping)
+  pageH: 792, mt: 36, mb: 36,   // usable ≈ 720pt
+  header: 58,       // \Huge name + contact line + gap
+  sectionHdr: 26,   // \large small-caps title + titlerule + spacing
+  eduEntry: 30,     // \resumeSubheading (two rows)
+  eduGap: 4,        // gap between edu entries
+  jobHdr: 30,       // \resumeSubheading (two rows)
+  jobGap: 4,        // spacing before each job
+  projectHdr: 22,   // \resumeProjectHeading (single row)
+  skillRow: 17,     // one \small skill line (wrap allowance)
+  bullet: 16,       // one \small bullet at 11pt (wrap allowance)
 }
 
 function bulletBudget(nJobs: number, nEdus: number, nProjects: number, nSkillCats: number): number {
@@ -119,6 +122,103 @@ function bulletBudget(nJobs: number, nEdus: number, nProjects: number, nSkillCat
     nSkillCats * PDF.skillRow
   // 0.80 safety factor accounts for bullets/skill rows that wrap to a second line; +2 corrects observed underbudget
   return Math.max(4, Math.floor((usable - fixed) / PDF.bullet * 0.80) + 2)
+}
+
+export function buildSelectionMessage(
+  data: ResumeData,
+  jobDescription: string,
+): string {
+  const { jobs, projects } = data
+
+  const jobList = sortByRecency(jobs).map((j, idx) => {
+    const start = formatDate(j.startDate)
+    const end = j.current ? 'Present' : formatDate(j.endDate)
+    const bullets = j.bullets?.trim()
+      ? j.bullets.split('\n').map(l => l.trim()).filter(Boolean).join('; ')
+      : ''
+    const context = [j.description?.trim(), bullets].filter(Boolean).join(' | ')
+    const recency = idx === 0 ? 'MOST RECENT' : recencyLabel(j.endDate, j.current)
+    return `[ID:${j.id}] [${recency}] ${j.title} at ${j.company} (${[start, end].filter(Boolean).join(' – ')})${context ? '\n  ' + context : ''}`
+  }).join('\n\n')
+
+  const projectList = sortProjectsByRecency(projects).map((p, idx) => {
+    const bullets = p.bullets?.trim()
+      ? p.bullets.split('\n').map(l => l.trim()).filter(Boolean).join('; ')
+      : ''
+    const tech = p.technologies ? `Tech: ${p.technologies}` : ''
+    const context = [tech, p.description?.trim(), bullets].filter(Boolean).join(' | ')
+    const recency = idx === 0 ? 'MOST RECENT' : (p.endDate ? recencyLabel(p.endDate, false) : '')
+    const recencyTag = recency ? ` [${recency}]` : ''
+    return `[ID:${p.id}]${recencyTag} ${p.name}${context ? '\n  ' + context : ''}`
+  }).join('\n\n')
+
+  return (
+    `Job posting:\n${jobDescription}\n\n` +
+    `---\n\n` +
+    `Work experience (listed most-recent first):\n${jobList || '(none)'}\n\n` +
+    `Projects (listed most-recent first):\n${projectList || '(none)'}\n\n` +
+    `---\n\n` +
+    `Select only what genuinely strengthens this specific application. A strong one-page resume typically shows 2-4 work experiences and 1-2 projects — quality over quantity.\n\n` +
+    `SELECTION RULES:\n` +
+    `1. Always include the [MOST RECENT] work experience unless it is completely unrelated to this role.\n` +
+    `2. Include an older job only if it directly matches the role's core requirements — not just because it exists.\n` +
+    `3. Include a project only if it clearly demonstrates skills called for in this role. When in doubt, leave it out.\n` +
+    `4. Order your selections by relevance to this role (most relevant first).\n\n` +
+    `Return ONLY this JSON:\n` +
+    `{"jobIds":["..."],"projectIds":["..."]}`
+  )
+}
+
+export function parseSelectionIds(
+  text: string,
+  allJobIds: string[],
+  allProjectIds: string[],
+): { jobIds: string[], projectIds: string[] } {
+  try {
+    const match = text.match(/\{[\s\S]*\}/)
+    if (!match) throw new Error('no json')
+    const parsed = JSON.parse(match[0]) as { jobIds?: unknown, projectIds?: unknown }
+    const jobIds = Array.isArray(parsed.jobIds)
+      ? (parsed.jobIds as string[]).filter(id => allJobIds.includes(id))
+      : allJobIds
+    const projectIds = Array.isArray(parsed.projectIds)
+      ? (parsed.projectIds as string[]).filter(id => allProjectIds.includes(id))
+      : allProjectIds
+    if (jobIds.length === 0 && allJobIds.length > 0) {
+      return { jobIds: allJobIds.slice(0, 1), projectIds }
+    }
+    return { jobIds, projectIds }
+  } catch {
+    return { jobIds: allJobIds, projectIds: allProjectIds }
+  }
+}
+
+// Drops the least-relevant entries (end of each array, model ordered most-relevant first)
+// until the bullet budget comfortably covers 3 bullets per entry. Projects are dropped
+// before jobs since jobs are the primary resume content.
+export function trimToPageFit(
+  jobIds: string[],
+  projectIds: string[],
+  nEdus: number,
+  nSkillCats: number,
+): { jobIds: string[], projectIds: string[] } {
+  let jIds = [...jobIds]
+  let pIds = [...projectIds]
+  while (true) {
+    const n = jIds.length + pIds.length
+    if (n === 0) break
+    const budget = bulletBudget(jIds.length, nEdus, pIds.length, nSkillCats)
+    // Each entry needs room for ~3 bullets (recent get 3, older get 2)
+    if (budget >= 3 * n) break
+    if (pIds.length > 0) {
+      pIds = pIds.slice(0, -1)
+    } else if (jIds.length > 1) {
+      jIds = jIds.slice(0, -1)
+    } else {
+      break
+    }
+  }
+  return { jobIds: jIds, projectIds: pIds }
 }
 
 function groupSkillsByCategory(skills: Skill[]): Record<string, string[]> {

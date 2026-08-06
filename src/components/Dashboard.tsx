@@ -1,31 +1,14 @@
 import { useMemo } from 'react'
 import { TrendingUp, Send, Activity, Trophy, BarChart2 } from 'lucide-react'
 import { useSection } from '../hooks/useSection'
-import type { Application, ApplicationStatus } from '../types'
+import { STATUSES, STATUS_META, countByStatus } from '../lib/status'
+import type { Application } from '../types'
 import {
-  BarChart, Bar, XAxis, YAxis,
+  BarChart, Bar, Cell, XAxis, YAxis,
   AreaChart, Area, CartesianGrid,
 } from 'recharts'
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart'
 import type { ChartConfig } from '@/components/ui/chart'
-
-const STATUSES: ApplicationStatus[] = [
-  'applied', 'screening', 'technical_assessment',
-  'interview', 'round1', 'round2', 'round3',
-  'offer', 'rejected',
-]
-
-const STATUS_META: Record<ApplicationStatus, { label: string; color: string }> = {
-  applied:              { label: 'Applied',               color: '#60a5fa' },
-  screening:            { label: 'Screening',             color: '#818cf8' },
-  technical_assessment: { label: 'Technical Assessment',  color: '#c084fc' },
-  interview:            { label: 'Interview',             color: '#fbbf24' },
-  round1:               { label: 'Round 1',               color: '#4ade80' },
-  round2:               { label: 'Round 2',               color: '#2dd4bf' },
-  round3:               { label: 'Round 3',               color: '#22d3ee' },
-  offer:                { label: 'Offer',                 color: '#10b981' },
-  rejected:             { label: 'Rejected',              color: '#52525b' },
-}
 
 const chartConfig: ChartConfig = {
   count: { label: 'Applications', color: 'var(--primary)' },
@@ -58,13 +41,7 @@ function StatCard({ label, value, sub, icon: Icon, accent = false }: {
 export default function Dashboard() {
   const { items: apps } = useSection<Application>('/applications')
 
-  const counts = useMemo(() =>
-    STATUSES.reduce<Record<ApplicationStatus, number>>((acc, s) => {
-      acc[s] = apps.filter(a => a.status === s).length
-      return acc
-    }, { applied: 0, screening: 0, technical_assessment: 0, interview: 0, round1: 0, round2: 0, round3: 0, offer: 0, rejected: 0 }),
-    [apps]
-  )
+  const counts = useMemo(() => countByStatus(apps), [apps])
 
   const total = apps.length
   const active = total - counts.rejected
@@ -151,7 +128,7 @@ export default function Dashboard() {
               <ChartTooltip content={<ChartTooltipContent />} />
               <Bar dataKey="count" radius={[0, 4, 4, 0]} maxBarSize={20}>
                 {statusData.map(entry => (
-                  <rect key={entry.name} fill={entry.fill} />
+                  <Cell key={entry.name} fill={entry.fill} />
                 ))}
               </Bar>
             </BarChart>

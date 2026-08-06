@@ -6,7 +6,11 @@ import {
 import { useSection } from '../hooks/useSection'
 import { useSettings } from '../hooks/useSettings'
 import { streamCompletion, checkConnection } from '../llm'
-import { SYSTEM_PROMPT, buildUserMessage, buildRefineMessage, enforceChronologicalOrder, stripCitations } from '../prompts'
+import {
+  SYSTEM_PROMPT, SELECTION_SYSTEM_PROMPT,
+  buildUserMessage, buildRefineMessage, buildSelectionMessage, parseSelectionIds,
+  enforceChronologicalOrder, stripCitations, trimToPageFit,
+} from '../prompts'
 import { Button, Card } from './ui'
 import type { Job, EducationEntry, Project, Skill, SavedResume, Profile } from '../types'
 
@@ -46,12 +50,15 @@ export default function Generate() {
   const [justSaved, setJustSaved] = useState(false)
   const [connected, setConnected] = useState<boolean | null>(null)
   const [refineInstructions, setRefineInstructions] = useState('')
+  const [phase, setPhase] = useState<'idle' | 'selecting' | 'generating'>('idle')
 
   // Live PDF preview
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState('')
   const previewBlobUrl = useRef<string | null>(null)
   const previewDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const previewSeq = useRef(0)
 
   useEffect(() => {
     checkConnection(settings.llamaEndpoint).then(setConnected)
@@ -65,17 +72,23 @@ export default function Generate() {
       return
     }
     if (previewDebounce.current) clearTimeout(previewDebounce.current)
-    const delay = streaming ? 2500 : 500
+    // LaTeX compiles take ~1-2s (vs pdfkit's ~10ms), so debounce generously
+    const delay = streaming ? 4000 : 1200
     previewDebounce.current = setTimeout(async () => {
+      const seq = ++previewSeq.current
       setPreviewLoading(true)
       try {
         const blob = await getPdfBlob(output)
+        if (seq !== previewSeq.current) return // a newer preview request superseded this one
         if (previewBlobUrl.current) URL.revokeObjectURL(previewBlobUrl.current)
         const url = URL.createObjectURL(blob)
         previewBlobUrl.current = url
         setPdfPreviewUrl(url)
-      } catch { /* silently ignore */ } finally {
-        setPreviewLoading(false)
+        setPreviewError('')
+      } catch (e) {
+        if (seq === previewSeq.current) setPreviewError(e instanceof Error ? e.message : 'PDF generation failed')
+      } finally {
+        if (seq === previewSeq.current) setPreviewLoading(false)
       }
     }, delay)
     return () => { if (previewDebounce.current) clearTimeout(previewDebounce.current) }
@@ -108,9 +121,58 @@ export default function Generate() {
   async function generate() {
     if (!jobDescription.trim()) { setError('Paste a job description first.'); return }
     if (profileEmpty) { setError('Add some experience in the other sections first.'); return }
-    setError(''); setOutput(''); setJustSaved(false); setLoading(true); setStreaming(true)
+    setError(''); setOutput(''); setJustSaved(false); setLoading(true); setStreaming(false)
+
+    // ── Phase 1: select relevant entries ─────────────────────────────────────
+    setPhase('selecting')
+    const skillCatCount = new Set(skills.map(s => s.category || 'General')).size
+
+    // Default fallback: all entries sorted by recency
+    const jobsByRecency     = [...jobs].sort((a, b) =>
+      (b.current ? '9999' : b.endDate || '').localeCompare(a.current ? '9999' : a.endDate || ''))
+    const projectsByRecency = [...projects].sort((a, b) =>
+      (b.endDate || '9999').localeCompare(a.endDate || '9999'))
+
+    // Job/project arrays in the order we'll pass to trimToPageFit (most-relevant first)
+    let orderedJobs     = jobsByRecency
+    let orderedProjects = projectsByRecency
+
+    if (jobs.length > 0 || projects.length > 0) {
+      try {
+        const selMsg = buildSelectionMessage({ jobs, education, projects, skills }, jobDescription)
+        let selText = ''
+        for await (const chunk of streamCompletion({
+          endpoint: settings.llamaEndpoint, model: settings.modelName,
+          messages: [{ role: 'user', content: selMsg }],
+          temperature: 0.1, maxTokens: 512,
+          system: SELECTION_SYSTEM_PROMPT,
+        })) { selText += chunk }
+
+        const { jobIds, projectIds } = parseSelectionIds(selText, jobs.map(j => j.id), projects.map(p => p.id))
+        // Preserve model's relevance ordering (most relevant first) for trimToPageFit
+        orderedJobs     = jobIds.map(id => jobs.find(j => j.id === id)!).filter(Boolean)
+        orderedProjects = projectIds.map(id => projects.find(p => p.id === id)!).filter(Boolean)
+      } catch {
+        // Fallback already set to recency order above
+      }
+    }
+
+    // ── Page-fit trim: drop least-relevant entries until bullet budget is comfortable ──
+    const { jobIds: fitJobIds, projectIds: fitProjectIds } = trimToPageFit(
+      orderedJobs.map(j => j.id),
+      orderedProjects.map(p => p.id),
+      education.length,
+      skillCatCount,
+    )
+    const selectedJobs     = orderedJobs.filter(j => fitJobIds.includes(j.id))
+    const selectedProjects = orderedProjects.filter(p => fitProjectIds.includes(p.id))
+
+    // ── Phase 2: generate resume with selected entries ────────────────────────
+    setPhase('generating')
+    setStreaming(true)
     try {
-      const userMessage = buildUserMessage({ jobs, education, projects, skills }, profile, jobDescription)
+      const selectedData = { jobs: selectedJobs, education, projects: selectedProjects, skills }
+      const userMessage = buildUserMessage(selectedData, profile, jobDescription)
       const gen = streamCompletion({
         endpoint: settings.llamaEndpoint, model: settings.modelName,
         messages: [{ role: 'user', content: userMessage }],
@@ -125,6 +187,7 @@ export default function Generate() {
       setOutput(prev => stripCitations(enforceChronologicalOrder(prev)))
       setLoading(false)
       setStreaming(false)
+      setPhase('idle')
     }
   }
 
@@ -171,7 +234,10 @@ export default function Generate() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: content }),
     })
-    if (!res.ok) throw new Error('PDF generation failed')
+    if (!res.ok) {
+      const data = await res.json().catch(() => null) as { error?: string } | null
+      throw new Error(data?.error ?? 'PDF generation failed')
+    }
     return res.blob()
   }
 
@@ -260,11 +326,19 @@ export default function Generate() {
           <div className="flex items-center gap-3">
             <Button onClick={generate} disabled={loading || !jobDescription.trim() || connected !== true}>
               <Sparkles size={14} className={loading ? 'animate-spin' : ''} />
-              {loading ? 'Generating…' : 'Generate Resume'}
+              {loading
+                ? phase === 'selecting' ? 'Selecting…' : 'Generating…'
+                : 'Generate Resume'}
               {!loading && <ChevronRight size={13} />}
             </Button>
             {profileEmpty && <p className="text-xs text-amber-400">Add your experience first.</p>}
             {error && <p className="text-xs text-red-400">{error}</p>}
+            {loading && phase === 'selecting' && (
+              <p className="text-xs text-zinc-500 flex items-center gap-1.5">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                Selecting relevant experience…
+              </p>
+            )}
           </div>
 
           {/* Editable output */}
@@ -370,8 +444,17 @@ export default function Generate() {
       <div className="flex-1 flex flex-col bg-zinc-950">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800 shrink-0">
           <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">PDF Preview</p>
-          {previewLoading && <Loader2 size={12} className="animate-spin text-zinc-600" />}
+          {previewLoading && (
+            <span className="flex items-center gap-1.5 text-xs text-zinc-600">
+              <Loader2 size={12} className="animate-spin" /> Compiling LaTeX…
+            </span>
+          )}
         </div>
+        {previewError && (
+          <div className="px-4 py-2 border-b border-red-500/20 bg-red-500/5 shrink-0">
+            <p className="text-xs text-red-400">{previewError}</p>
+          </div>
+        )}
         <div className="flex-1 overflow-hidden">
           {pdfPreviewUrl ? (
             <iframe key={pdfPreviewUrl} src={pdfPreviewUrl} className="w-full h-full border-none" title="Resume PDF preview" />

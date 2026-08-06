@@ -1,9 +1,9 @@
 import express from 'express'
 import cors from 'cors'
 import { randomUUID } from 'crypto'
-import PDFDocument from 'pdfkit'
 import { Readability } from '@mozilla/readability'
 import { JSDOM } from 'jsdom'
+import { checkTectonic, compileOnePageResume, serialized, warmUp, LatexError } from './tectonic'
 import { db, initDb } from './db/index'
 import { jobs, education, projects, skills, targetJobs, applications, settings, profile, savedResumes } from './db/schema'
 import { eq } from 'drizzle-orm'
@@ -167,248 +167,28 @@ router.post('/fetch-jd', async (req, res) => {
   }
 })
 
-// ─── PDF generation ──────────────────────────────────────────────────────────
+// ─── PDF generation (LaTeX via tectonic, Jake's Resume template) ─────────────
 
-router.post('/pdf', (req, res) => {
+router.post('/pdf', async (req, res) => {
   const { text, filename = 'resume' } = req.body as { text: string; filename?: string }
+  if (!text?.trim()) { res.status(400).json({ error: 'text required' }); return }
 
-  const ML = 46, MR = 46, MT = 40
-  const doc = new PDFDocument({ margin: 0, size: 'LETTER' })
-  res.setHeader('Content-Type', 'application/pdf')
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}.pdf"`)
-  doc.pipe(res)
-
-  const PW = doc.page.width           // 612
-  const UW = PW - ML - MR             // 520
-  const MAX_Y = doc.page.height - 36  // stop before bottom margin
-  const FS = 10
-  const BASE_LG = 1.0
-
-  const T  = 'Times-Roman'
-  const TB = 'Times-Bold'
-  const TI = 'Times-Italic'
-
-  // ── Pass 1: measure total content height ──────────────────────────────────
-  // Mirror the render logic exactly, accumulating heights via heightOfString.
-  // Must set doc.x = ML before each call so wrap width is computed correctly.
-
-  function measureLines(lines: string[]): number {
-    let h = 0
-    let prevMTag = ''
-
-    function mH(font: string, fs: number, txt: string, width: number, lg: number): number {
-      doc.font(font).fontSize(fs)
-      doc.x = ML
-      return doc.heightOfString(txt, { width, lineGap: lg })
-    }
-
-    for (const raw of lines) {
-      if (raw.startsWith('[NAME]')) {
-        h += mH(TB, 18, raw.slice(6).trim(), UW, 2)
-
-      } else if (raw.startsWith('[CONTACT]')) {
-        h += mH(T, 9.5, raw.slice(9).trim(), UW, 1)
-        h += 0.2 * (BASE_LG + doc.currentLineHeight(false))  // moveDown(0.2)
-
-      } else if (raw.startsWith('[SECTION]')) {
-        // moveDown(0.28) + title + 3pt gap after rule
-        h += 0.28 * (BASE_LG + doc.currentLineHeight(false))
-        h += mH(TB, FS, raw.slice(9).trim(), UW, BASE_LG)
-        h += 3
-
-      } else if (raw.startsWith('[EDU_INST]')) {
-        if (prevMTag === 'EDU_DEG') h += 0.3 * (BASE_LG + doc.currentLineHeight(false))
-        const [left, right = ''] = raw.slice(10).split('\t')
-        if (right) {
-          doc.font(T).fontSize(FS)
-          const rW = doc.widthOfString(right.trim()) + 1
-          h += mH(TB, FS, left.trim(), UW - rW - 6, BASE_LG)
-        } else {
-          h += mH(TB, FS, left.trim(), UW, BASE_LG)
-        }
-        prevMTag = 'EDU_INST'
-
-      } else if (raw.startsWith('[EDU_DEG]')) {
-        const [left, right = ''] = raw.slice(9).split('\t')
-        if (right) {
-          doc.font(T).fontSize(FS)
-          const rW = doc.widthOfString(right.trim()) + 1
-          h += mH(TI, FS, left.trim(), UW - rW - 6, BASE_LG)
-        } else {
-          h += mH(TI, FS, left.trim(), UW, BASE_LG)
-        }
-        prevMTag = 'EDU_DEG'
-
-      } else if (raw.startsWith('[JOB_CO]')) {
-        // moveDown(0.22) gap (skip for very first item)
-        h += 0.22 * (BASE_LG + doc.currentLineHeight(false))
-        const [left, right = ''] = raw.slice(8).split('\t')
-        if (right) {
-          doc.font(TB).fontSize(FS)
-          const rW = doc.widthOfString(right.trim()) + 1
-          h += mH(TB, FS, left.trim(), UW - rW - 6, BASE_LG)
-        } else {
-          h += mH(TB, FS, left.trim(), UW, BASE_LG)
-        }
-
-      } else if (raw.startsWith('[JOB_ROLE]')) {
-        const [left, right = ''] = raw.slice(10).split('\t')
-        if (right) {
-          doc.font(T).fontSize(FS)
-          const rW = doc.widthOfString(right.trim()) + 1
-          h += mH(TI, FS, left.trim(), UW - rW - 6, BASE_LG)
-        } else {
-          h += mH(TI, FS, left.trim(), UW, BASE_LG)
-        }
-
-      } else if (raw.startsWith('[PROJECT]')) {
-        h += 0.22 * (BASE_LG + doc.currentLineHeight(false))
-        const [left, right = ''] = raw.slice(9).split('\t')
-        if (right) {
-          doc.font(T).fontSize(FS)
-          const rW = doc.widthOfString(right.trim()) + 1
-          h += mH(TB, FS, left.trim(), UW - rW - 6, BASE_LG)
-        } else {
-          h += mH(TB, FS, left.trim(), UW, BASE_LG)
-        }
-
-      } else if (raw.startsWith('[BULLET]')) {
-        h += mH(T, FS, raw.slice(8).trim(), UW - 13, BASE_LG)
-
-      } else if (raw.startsWith('[SKILL]')) {
-        const content = raw.slice(7).trim()
-        const colonIdx = content.indexOf(':')
-        if (colonIdx > 0 && colonIdx < 35) {
-          const rest = content.slice(colonIdx + 1)
-          h += mH(T, FS, rest, UW - 13, BASE_LG)
-        } else {
-          h += mH(T, FS, content, UW - 13, BASE_LG)
-        }
-      }
-    }
-    return h
+  if (!(await checkTectonic())) {
+    res.status(503).json({
+      error: 'LaTeX engine not installed. Run: brew install tectonic (then retry — no server restart needed)',
+    })
+    return
   }
 
-  const lines = text.split('\n')
-  const measured = measureLines(lines)
-  const available = MAX_Y - MT
-  const rawScale = available / measured
-  // Clamp: never shrink below 0.80 or expand beyond 1.25
-  const spacingScale = Math.min(1.25, Math.max(0.80, rawScale))
-  const LG = BASE_LG * spacingScale
-
-  // ── Pass 2: render ─────────────────────────────────────────────────────────
-
-  doc.y = MT
-  const full = () => doc.y >= MAX_Y
-
-  function row(left: string, leftFont: string, right: string, rightFont: string, fs = FS) {
-    if (full()) return
-    const y = doc.y
-    if (right) {
-      doc.font(rightFont).fontSize(fs)
-      const rW = doc.widthOfString(right) + 1
-      doc.font(rightFont).fontSize(fs).fillColor('#111')
-         .text(right, PW - MR - rW, y, { lineBreak: false })
-      doc.font(leftFont).fontSize(fs).fillColor('#111').lineGap(LG)
-         .text(left, ML, y, { width: UW - rW - 6 })
-    } else {
-      doc.font(leftFont).fontSize(fs).fillColor('#111').lineGap(LG)
-         .text(left, ML, y, { width: UW })
-    }
+  try {
+    const pdf = await serialized(() => compileOnePageResume(text))
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}.pdf"`)
+    res.send(pdf)
+  } catch (e) {
+    const err = e as LatexError
+    res.status(422).json({ error: err.message ?? 'LaTeX compile failed', logTail: err.logTail })
   }
-
-  function sectionHeader(title: string) {
-    if (full()) return
-    doc.moveDown(0.28 * spacingScale)
-    const y = doc.y
-    doc.font(TB).fontSize(FS).fillColor('#000')
-       .text(title, ML, y, { width: UW })
-    const lineY = doc.y
-    doc.moveTo(ML, lineY).lineTo(PW - MR, lineY)
-       .strokeColor('#000').lineWidth(0.65).stroke()
-    doc.y = lineY + 3 * spacingScale
-  }
-
-  function bullet(content: string) {
-    if (full()) return
-    const y = doc.y
-    doc.font(T).fontSize(FS).fillColor('#111')
-       .text('•', ML + 3, y, { lineBreak: false })
-    doc.font(T).fontSize(FS).fillColor('#111').lineGap(LG)
-       .text(content, ML + 13, y, { width: UW - 13 })
-  }
-
-  function skillRow(content: string) {
-    if (full()) return
-    const colonIdx = content.indexOf(':')
-    const y = doc.y
-    doc.font(T).fontSize(FS).fillColor('#111')
-       .text('•', ML + 3, y, { lineBreak: false })
-    if (colonIdx > 0 && colonIdx < 35) {
-      const bold = content.slice(0, colonIdx + 1)
-      const rest = content.slice(colonIdx + 1)
-      doc.font(TB).fontSize(FS).fillColor('#111').lineGap(LG)
-         .text(bold, ML + 13, y, { continued: true, width: UW - 13 })
-      doc.font(T).fontSize(FS).fillColor('#111').lineGap(LG)
-         .text(rest, { continued: false })
-    } else {
-      doc.font(T).fontSize(FS).fillColor('#111').lineGap(LG)
-         .text(content, ML + 13, y, { width: UW - 13 })
-    }
-  }
-
-  let prevTag = ''
-
-  for (const raw of lines) {
-    if (full()) break
-
-    if (raw.startsWith('[NAME]')) {
-      doc.font(TB).fontSize(18).fillColor('#000').lineGap(2 * spacingScale)
-         .text(raw.slice(6).trim(), ML, doc.y, { width: UW, align: 'center' })
-
-    } else if (raw.startsWith('[CONTACT]')) {
-      doc.font(T).fontSize(9.5).fillColor('#333').lineGap(1 * spacingScale)
-         .text(raw.slice(9).trim(), ML, doc.y, { width: UW, align: 'center' })
-      doc.moveDown(0.2 * spacingScale)
-
-    } else if (raw.startsWith('[SECTION]')) {
-      sectionHeader(raw.slice(9).trim())
-
-    } else if (raw.startsWith('[EDU_INST]')) {
-      if (prevTag === 'EDU_DEG') doc.moveDown(0.3 * spacingScale)
-      const [left, right = ''] = raw.slice(10).split('\t')
-      row(left.trim(), TB, right.trim(), T)
-      prevTag = 'EDU_INST'
-
-    } else if (raw.startsWith('[EDU_DEG]')) {
-      const [left, right = ''] = raw.slice(9).split('\t')
-      row(left.trim(), TI, right.trim(), T)
-      prevTag = 'EDU_DEG'
-
-    } else if (raw.startsWith('[JOB_CO]')) {
-      if (doc.y > MT + 30) doc.moveDown(0.22 * spacingScale)
-      const [left, right = ''] = raw.slice(8).split('\t')
-      row(left.trim(), TB, right.trim(), TB)
-
-    } else if (raw.startsWith('[JOB_ROLE]')) {
-      const [left, right = ''] = raw.slice(10).split('\t')
-      row(left.trim(), TI, right.trim(), T)
-
-    } else if (raw.startsWith('[PROJECT]')) {
-      if (doc.y > MT + 30) doc.moveDown(0.22 * spacingScale)
-      const [left, right = ''] = raw.slice(9).split('\t')
-      row(left.trim(), TB, right.trim(), T)
-
-    } else if (raw.startsWith('[BULLET]')) {
-      bullet(raw.slice(8).trim())
-
-    } else if (raw.startsWith('[SKILL]')) {
-      skillRow(raw.slice(7).trim())
-    }
-  }
-
-  doc.end()
 })
 
 // ─── Mount & start ───────────────────────────────────────────────────────────
@@ -418,4 +198,8 @@ app.use('/api', router)
 const PORT = process.env.PORT ?? 3001
 app.listen(PORT, () => {
   console.log(`AppChef server → http://localhost:${PORT}`)
+  checkTectonic().then(ok => {
+    if (ok) warmUp()
+    else console.warn('[pdf] tectonic not found — /api/pdf disabled. Install with: brew install tectonic')
+  })
 })

@@ -6,7 +6,7 @@ const fallback: AppSettings = {
   llamaEndpoint: 'http://localhost:8080',
   modelName: '',
   temperature: 0.7,
-  maxTokens: 2048,
+  maxTokens: 32000,
 }
 
 export function useSettings() {

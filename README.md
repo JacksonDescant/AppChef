@@ -1,16 +1,27 @@
-# React + Vite
+# AppChef
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Local-first AI resume tailoring. Keep a structured profile (jobs, education, projects, skills), paste a target job description, and a locally-hosted LLM generates a one-page resume tailored to that job and rendered as a LaTeX PDF in the Jake's Resume format.
 
-Currently, two official plugins are available:
+## Requirements
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Node.js** (20+)
+- **Tectonic** (LaTeX engine) — `brew install tectonic`
+  - The first compile after install downloads LaTeX packages (~30–90s); the server runs a warm-up compile at startup so this doesn't hit your first preview.
+  - Set `TECTONIC_PATH` to point at the binary if it isn't on `PATH`.
+- **An OpenAI-compatible local LLM server** (llama.cpp, Ollama, LM Studio) — endpoint configurable in Settings, defaults to `http://localhost:8080`.
 
-## React Compiler
+## Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```sh
+npm install
+npm run dev        # client (vite, :5173) + server (express, :3001)
+```
 
-## Expanding the ESLint configuration
+Other scripts: `npm run typecheck`, `npm run lint`, `npm run build`.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Architecture
+
+- `src/` — React 19 + Vite SPA (Tailwind v4). LLM calls happen client-side via `src/llm.ts`.
+- `server/` — Express 5 API + SQLite (better-sqlite3 + Drizzle). Data lives in `appchef.db`.
+- `server/latex.ts` — converts the LLM's tagged resume text into a Jake's Resume LaTeX document.
+- `server/tectonic.ts` — compiles it via tectonic and **enforces exactly one page**: progressively tighter spacing presets, then trimming the least-important content, recompiling until the output is a single page.

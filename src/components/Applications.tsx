@@ -4,36 +4,7 @@ import { ResponsiveSankey } from '@nivo/sankey'
 import { useSection } from '../hooks/useSection'
 import type { Application, ApplicationStatus } from '../types'
 import { Button, SectionHeader, EmptyState } from './ui'
-
-const STATUSES: ApplicationStatus[] = [
-  'applied', 'screening', 'technical_assessment',
-  'interview', 'round1', 'round2', 'round3',
-  'offer', 'rejected',
-]
-
-const STATUS_LABELS: Record<ApplicationStatus, string> = {
-  applied:              'Applied',
-  screening:            'Screening',
-  technical_assessment: 'Technical Assessment',
-  interview:            'Interview',
-  round1:               'Round 1',
-  round2:               'Round 2',
-  round3:               'Round 3',
-  offer:                'Offer',
-  rejected:             'Rejected',
-}
-
-const STATUS_STYLES: Record<ApplicationStatus, string> = {
-  applied:              'text-blue-400    border-blue-500/30    bg-blue-500/5',
-  screening:            'text-indigo-400  border-indigo-500/30  bg-indigo-500/5',
-  technical_assessment: 'text-purple-400  border-purple-500/30  bg-purple-500/5',
-  interview:            'text-yellow-400  border-yellow-500/30  bg-yellow-500/5',
-  round1:               'text-orange-300  border-orange-400/30  bg-orange-400/5',
-  round2:               'text-teal-400    border-teal-500/30    bg-teal-500/5',
-  round3:               'text-cyan-400    border-cyan-500/30    bg-cyan-500/5',
-  offer:                'text-emerald-400 border-emerald-500/30 bg-emerald-500/5',
-  rejected:             'text-zinc-500    border-zinc-700       bg-zinc-800/50',
-}
+import { STATUSES, STATUS_META, countByStatus } from '../lib/status'
 
 type ColKey = 'company' | 'role' | 'status' | 'appliedAt' | 'url' | 'notes'
 type ColType = 'text' | 'date' | 'url' | 'status'
@@ -89,13 +60,7 @@ export default function Applications() {
     })
   }, [apps, sort])
 
-  const counts = useMemo(() =>
-    STATUSES.reduce<Record<ApplicationStatus, number>>((acc, s) => {
-      acc[s] = apps.filter(a => a.status === s).length
-      return acc
-    }, { applied: 0, screening: 0, technical_assessment: 0, interview: 0, round1: 0, round2: 0, round3: 0, offer: 0, rejected: 0 }),
-    [apps]
-  )
+  const counts = useMemo(() => countByStatus(apps), [apps])
 
   async function commit() {
     const cell = activeCellRef.current
@@ -211,8 +176,8 @@ export default function Applications() {
       {apps.length > 0 && (
         <div className="flex gap-2 mb-4 flex-wrap">
           {STATUSES.filter(s => counts[s] > 0).map(s => (
-            <span key={s} className={`text-xs px-2 py-0.5 rounded-full border ${STATUS_STYLES[s]}`}>
-              {counts[s]} {STATUS_LABELS[s]}
+            <span key={s} className={`text-xs px-2 py-0.5 rounded-full border ${STATUS_META[s].style}`}>
+              {counts[s]} {STATUS_META[s].label}
             </span>
           ))}
         </div>
@@ -296,7 +261,7 @@ export default function Applications() {
                           className="w-full h-full px-2 bg-zinc-900 text-zinc-100 outline-none text-xs border-0 cursor-pointer"
                         >
                           {STATUSES.map(s => (
-                            <option key={s} value={s}>{STATUS_LABELS[s]}</option>
+                            <option key={s} value={s}>{STATUS_META[s].label}</option>
                           ))}
                         </select>
                       )}
@@ -304,8 +269,8 @@ export default function Applications() {
                       {/* View: status pill */}
                       {!isActive && col.type === 'status' && (
                         <div className="px-2 h-full flex items-center">
-                          <span className={`px-1.5 py-0.5 rounded-full border text-xs ${STATUS_STYLES[app.status]}`}>
-                            {STATUS_LABELS[app.status]}
+                          <span className={`px-1.5 py-0.5 rounded-full border text-xs ${STATUS_META[app.status].style}`}>
+                            {STATUS_META[app.status].label}
                           </span>
                         </div>
                       )}
@@ -394,7 +359,7 @@ function ApplicationSankey({ apps, counts }: { apps: Application[]; counts: Reco
     ...(counts.rejected > 0 ? [{ id: 'rejected', label: 'Rejected' }] : []),
     ...STAGE_STATUSES
       .filter(s => counts[s] > 0)
-      .map(s => ({ id: s, label: STATUS_LABELS[s] })),
+      .map(s => ({ id: s, label: STATUS_META[s].label })),
   ]
 
   const links = [
