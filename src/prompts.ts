@@ -23,12 +23,12 @@ OUTPUT FORMAT:
 [JOB_CO]Company Name\tCity, State
 [JOB_ROLE]Job Title\tMon YYYY – Mon YYYY (e.g. "Jun 2022 – Present"; "Present" replaces the end date for a current role. Always include the start date)
 [BULLET]Achievement-focused bullet reframed from candidate's source data [S1]
-(minimum 2 bullets per job; WEIGHT BY RECENCY — the most recent role gets the most bullets and detail, and within this section an older entry must never have more bullets than a more recent one; most recent first; omit irrelevant jobs entirely rather than giving them fewer than 2 bullets)
+(minimum 2, maximum 3 bullets per job; WEIGHT BY RECENCY — the most recent role gets the most bullets and detail, and within this section an older entry must never have more bullets than a more recent one; most recent first; omit irrelevant jobs entirely rather than giving them fewer than 2 bullets)
 
 [SECTION]PROJECTS
 [PROJECT]Project Name | Tech1, Tech2, Tech3\tMon YYYY – Mon YYYY
 [BULLET]What you built and its measurable impact [S2]
-(after " | ", list the 2–5 most job-relevant technologies copied from the project's Technologies list; omit the " | ..." part when no technologies were provided; minimum 2 bullets per project; most relevant projects only; omit a project entirely rather than giving it fewer than 2 bullets)
+(after " | ", list the 2–5 most job-relevant technologies copied from the project's Technologies list; omit the " | ..." part when no technologies were provided; minimum 2, maximum 3 bullets per project; most relevant projects only)
 
 [SECTION]TECHNICAL SKILLS
 [SKILL]Category: skill1, skill2, skill3
@@ -48,7 +48,9 @@ RULES:
 11. Never fabricate or exaggerate. Reframe truthfully to match the role.
 12. NEVER invent, modify, or estimate any date. Copy dates exactly as given in the candidate's profile data. If a date was not provided, omit it entirely rather than guessing.
 13. Copy job titles exactly as provided. Some titles include a market-standard form with the internal title in parentheses — keep both, unchanged.
-14. MINIMUM BULLETS: Every work experience entry and every project entry that appears in the resume MUST have at least 2 [BULLET] lines. If page space is tight, drop an entire entry rather than leaving any entry with only 1 bullet.`
+14. MINIMUM BULLETS: Every work experience entry and every project entry that appears in the resume MUST have at least 2 [BULLET] lines. If page space is tight, drop an entire entry rather than leaving any entry with only 1 bullet.
+15. BULLET CAP: No entry may have more than 3 bullets. AT MOST ONE entry in the entire resume may have 4 — and only when that entry is extremely relevant to the target role. The cap overrides the page-fill count.
+16. PROJECTS PRESENCE: If PROJECTS entries are provided in the profile data, the PROJECTS section must appear with at least one project — two when space allows. Never drop the section entirely; drop an older job's bullet count or an older job before dropping the last project.`
 
 export interface ResumeData {
   jobs: Job[]
@@ -204,7 +206,7 @@ export function buildShortlistMessage(
     `1. Trust the ranking unless you see a clear semantic mismatch the scores missed (e.g. same tools, unrelated domain).\n` +
     `2. Always include the most recent work experience unless it is completely unrelated to this role.\n` +
     `3. WEIGHT RECENCY: when two entries are comparably relevant, always prefer the more recent one. A job that ended more than ~2 years ago must uniquely cover a core requirement to earn its place.\n` +
-    `4. Drop entries marked "no requirement evidence found" unless they are the most recent job.\n` +
+    `4. PROJECTS: always keep the top-ranked project; keep a second when it shows requirement evidence. Beyond that, drop entries marked "no requirement evidence found" unless they are the most recent job.\n` +
     `5. Keep your output ordered most-relevant first.\n\n` +
     `Return ONLY this JSON:\n` +
     `{"jobIds":["..."],"projectIds":["..."]}`
@@ -260,9 +262,13 @@ export function parseShortlist(
     const jobIds = Array.isArray(parsed.jobIds)
       ? (parsed.jobIds as string[]).filter(id => rankedJobIds.includes(id))
       : rankedJobIds
-    const projectIds = Array.isArray(parsed.projectIds)
+    let projectIds = Array.isArray(parsed.projectIds)
       ? (parsed.projectIds as string[]).filter(id => rankedProjectIds.includes(id))
       : rankedProjectIds
+    // Floor: the model may not drop the projects section entirely (owner rule)
+    if (projectIds.length === 0 && rankedProjectIds.length > 0) {
+      projectIds = rankedProjectIds.slice(0, 1)
+    }
     if (jobIds.length === 0 && rankedJobIds.length > 0) {
       return { jobIds: rankedJobIds.slice(0, 1), projectIds }
     }
@@ -272,9 +278,12 @@ export function parseShortlist(
   }
 }
 
-// Drops the least-relevant entries (end of each array, model ordered most-relevant first)
-// until the bullet budget comfortably covers 3 bullets per entry. Projects are dropped
-// before jobs since jobs are the primary resume content.
+// Drops the least-relevant entries (end of each array, entries ordered
+// most-relevant first) until the bullet budget covers 2 bullets per entry
+// plus slack for the top role's extras. Sacrifice ladder preserves the
+// projects section (owner rule: at least 1 project, ideally 2):
+//   projects beyond 2 → jobs down to 2 → the 2nd project → jobs down to 1.
+// The last project is never dropped here.
 export function trimToPageFit(
   jobIds: string[],
   projectIds: string[],
@@ -288,15 +297,12 @@ export function trimToPageFit(
     const n = jIds.length + pIds.length
     if (n === 0) break
     const budget = bulletBudget(jIds.length, nEdus, pIds.length, nSkillCats, hasSummary)
-    // Each entry needs room for ~3 bullets (recent get 3, older get 2)
-    if (budget >= 3 * n) break
-    if (pIds.length > 0) {
-      pIds = pIds.slice(0, -1)
-    } else if (jIds.length > 1) {
-      jIds = jIds.slice(0, -1)
-    } else {
-      break
-    }
+    if (budget >= 2 * n + 2) break
+    if (pIds.length > 2) { pIds = pIds.slice(0, -1); continue }
+    if (jIds.length > 2) { jIds = jIds.slice(0, -1); continue }
+    if (pIds.length > 1) { pIds = pIds.slice(0, -1); continue }
+    if (jIds.length > 1) { jIds = jIds.slice(0, -1); continue }
+    break
   }
   return { jobIds: jIds, projectIds: pIds }
 }
@@ -393,13 +399,18 @@ function pageFillInstruction(data: ResumeData, hasSummary: boolean): string {
     Object.keys(byCategory).length,
     hasSummary,
   )
-  const minRequired = 2 * (data.jobs.length + data.projects.length)
-  const effective = Math.max(budget, minRequired)
+  const n = data.jobs.length + data.projects.length
+  const minRequired = 2 * n
+  // Rule 15 cap: every entry ≤3 bullets, plus one extra for at most one
+  // extremely relevant entry — never ask for more than the caps allow.
+  const capped = 3 * n + 1
+  const effective = Math.max(Math.min(budget, capped), minRequired)
   return (
     `PAGE FILL REQUIREMENT: Based on the layout, this resume has space for exactly ${effective} bullet points ` +
-    `across all work experience and project entries combined. You MUST write exactly that many [BULLET] lines — ` +
-    `no more (it will overflow the page) and no fewer (it will leave blank space). ` +
-    `Every entry that appears must receive at least 2 bullets. ` +
+    `across all work experience and project entries combined. Write that many [BULLET] lines — ` +
+    `no more (it will overflow the page). ` +
+    `Every entry that appears must receive at least 2 bullets, and the rule-15 cap (3 per entry, ` +
+    `one extremely relevant entry may have 4) always wins over this count. ` +
     `Allocate the remaining bullets top-down by recency: the most recent role gets the largest share, ` +
     `and within WORK EXPERIENCE an older entry must never have more bullets than a more recent one.`
   )

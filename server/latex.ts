@@ -362,8 +362,10 @@ export function renderTex(ir: ResumeIR, knobs: SqueezeKnobs): string {
 // Removes the least-important piece of content, in priority order:
 //   1. last bullet of the bottom-most entry holding >2 bullets (keeps the
 //      prompt's minimum-2-bullets rule intact)
-//   2. the last project entry
-//   3. the last job entry — but never the first job in the document
+//   2. project entries down to one (the projects section should survive)
+//   3. job entries — but never the first job in the document
+//   4. last resort: the final project, only when the alternative is failing
+//      to fit the page at all
 // Returns false when nothing more can be dropped. Mutates `ir`.
 export function dropOne(ir: ResumeIR): boolean {
   const entries = ir.sections.flatMap(s => s.entries)
@@ -376,19 +378,19 @@ export function dropOne(ir: ResumeIR): boolean {
     }
   }
 
-  function removeLast(kind: 'project' | 'job'): boolean {
+  function removeLast(kind: 'project' | 'job', keepAtLeast: number): boolean {
     const found: { section: ResumeSection; index: number }[] = []
     for (const s of ir.sections) {
       s.entries.forEach((e, i) => { if (e.kind === kind) found.push({ section: s, index: i }) })
     }
-    if (found.length === 0) return false
-    if (kind === 'job' && found.length === 1) return false // never drop the first job
+    if (found.length <= keepAtLeast) return false
     const { section, index } = found[found.length - 1]
     section.entries.splice(index, 1)
     return true
   }
 
-  if (removeLast('project')) return true
-  if (removeLast('job')) return true
+  if (removeLast('project', 1)) return true
+  if (removeLast('job', 1)) return true // never drop the first job
+  if (removeLast('project', 0)) return true
   return false
 }
