@@ -142,7 +142,7 @@ export async function warmUp(): Promise<void> {
     '[CONTACT]warmup@example.com',
     '[SECTION]INIT',
     '[JOB_CO]AppChef\tLocal',
-    '[JOB_ROLE]Warm-up compile\t01/2026 – Present',
+    '[JOB_ROLE]Warm-up compile\tJan 2026 – Present',
     '[BULLET]Preloads tectonic packages at server start',
     '[BULLET]Keeps the first real preview fast',
   ].join('\n')

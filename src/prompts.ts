@@ -1,45 +1,54 @@
-import type { Job, EducationEntry, Project, Skill, Profile } from './types'
+import type { Job, EducationEntry, Project, Skill, Profile, RetrievalResult } from './types'
 
-export const SELECTION_SYSTEM_PROMPT = `You are a resume strategist. Your only job is to select which of the candidate's work experiences and projects are most relevant for a specific job posting. Return ONLY a valid JSON object — no explanation, no preamble, no markdown fences.`
+export const EXTRACTION_SYSTEM_PROMPT = `You are a job-posting analyst. Extract the posting's target title and priority requirements. Return ONLY a valid JSON object — no explanation, no preamble, no markdown fences.`
+
+export const SHORTLIST_SYSTEM_PROMPT = `You are a resume strategist. You receive the candidate's work experiences and projects ALREADY RANKED by a deterministic relevance engine (higher score = stronger evidence for this job). Confirm or adjust the final selection. Return ONLY a valid JSON object — no explanation, no preamble, no markdown fences.`
+
+// Keywords extracted from a job description during the selection call.
+// Drives the PRIORITY KEYWORDS block in the generation prompt and the
+// coverage meter in the UI (see src/lib/coverage.ts).
+export interface JdKeywords {
+  targetTitle: string
+  mustHave: string[]
+  niceToHave: string[]
+}
 
 export const SYSTEM_PROMPT = `You are an expert resume writer and career strategist. Produce a tailored, one-page resume using ONLY the exact tagged format below. Output nothing else — no preamble, no explanation, no markdown fences.
 
 OUTPUT FORMAT:
 
-[NAME]Full Name
-[CONTACT]City, State | email | website (only include fields that were provided; omit blanks)
-
-[SECTION]EDUCATION
-[EDU_INST]Institution Name\tDate label — still enrolled: "Expected: Month YYYY"; completed degree: "Month YYYY" (no prefix)
-[EDU_DEG]Degree, Field of Study, Minor if any\tGPA: X.XX/4.0
-(omit the GPA right-column if not provided; repeat EDU_INST + EDU_DEG for each entry, most recent first)
+[SUMMARY]2–3 line professional summary tailored to the target role — include this tag ONLY if the candidate profile provides a Summary; omit the tag entirely otherwise. No citation tags here.
 
 [SECTION]WORK EXPERIENCE
 [JOB_CO]Company Name\tCity, State
-[JOB_ROLE]Job Title\tMM/YYYY – MM/YYYY (or "Present" instead of the end date. Always include the start date)
+[JOB_ROLE]Job Title\tMon YYYY – Mon YYYY (e.g. "Jun 2022 – Present"; "Present" replaces the end date for a current role. Always include the start date)
 [BULLET]Achievement-focused bullet reframed from candidate's source data [S1]
-(minimum 2 bullets per job, up to 3 for recent/high-relevance roles; most recent first; omit irrelevant jobs entirely rather than giving them fewer than 2 bullets)
+(minimum 2 bullets per job; WEIGHT BY RECENCY — the most recent role gets the most bullets and detail, and within this section an older entry must never have more bullets than a more recent one; most recent first; omit irrelevant jobs entirely rather than giving them fewer than 2 bullets)
 
 [SECTION]PROJECTS
-[PROJECT]Project Name\tMM/YYYY – MM/YYYY
+[PROJECT]Project Name | Tech1, Tech2, Tech3\tMon YYYY – Mon YYYY
 [BULLET]What you built and its measurable impact [S2]
-(minimum 2 bullets per project; most relevant projects only; omit a project entirely rather than giving it fewer than 2 bullets)
+(after " | ", list the 2–5 most job-relevant technologies copied from the project's Technologies list; omit the " | ..." part when no technologies were provided; minimum 2 bullets per project; most relevant projects only; omit a project entirely rather than giving it fewer than 2 bullets)
 
 [SECTION]TECHNICAL SKILLS
 [SKILL]Category: skill1, skill2, skill3
-(3–5 rows; prioritize skills that match the target job description)
+(3–4 rows; order skills within each row so the ones matching the target job description come first)
 
 RULES:
-1. Use ONLY the tagged lines above. No other text or blank lines between tags.
+1. Use ONLY the tagged lines above. No other text or blank lines between tags. NEVER output [NAME], [CONTACT], [EDU_INST], [EDU_DEG], or an EDUCATION section — the header and education are added automatically from the candidate's profile.
 2. The \\t in two-column lines is a literal tab character separating left content from right content.
 3. Bullets must be concise — one line each. Quantify impact wherever the source data supports it.
 4. GROUNDING — CITATIONS REQUIRED: Every [BULLET] line must end with a citation tag: [S1] for a single source, [S1,S3] when synthesizing across multiple. The numbers correspond to [S#] labels in the candidate's profile data. If a bullet draws from an entry's Description field (not a numbered bullet), use [Sdesc]. Citations are stripped from the final resume output — they exist only to enforce factual grounding. You MAY: reframe and strengthen language, change emphasis to match the role, synthesize across multiple source bullets, and highlight the natural significance and implications of the candidate's actual work — even if the source phrasing is plain. You MAY NOT: introduce specific numbers, metrics, team sizes, dollar figures, dates, or concrete outcomes that are not present in the cited source(s). If source [S2] says "improved performance", you may write "drove critical performance improvements [S2]" — but NOT "improved performance by 40% [S2]" unless 40% appears in [S2].
-5. Mirror keywords and technical terms from the job description naturally and truthfully.
-6. ORDERING IS MANDATORY: every section must appear in strict reverse-chronological order by END DATE — most recent end date first. "Present" is the most recent possible end date. This cannot be changed for any reason, including relevance to the job. Recency weighting affects bullet count and detail, not the order entries appear. The candidate's entries are pre-sorted — output them in the EXACT ORDER they are provided.
-7. The entire output must represent one page of content — be selective and concise but always use the full page.
-8. Never fabricate or exaggerate. Reframe truthfully to match the role.
-9. NEVER invent, modify, or estimate any date. Copy dates exactly as given in the candidate's profile data. If a date was not provided, omit it entirely rather than guessing.
-10. MINIMUM BULLETS: Every work experience entry and every project entry that appears in the resume MUST have at least 2 [BULLET] lines. If page space is tight, drop an entire entry rather than leaving any entry with only 1 bullet.`
+5. KEYWORDS — COVERAGE, NOT FREQUENCY: Mirror keywords and technical terms from the job description naturally and truthfully. Address each job requirement ONCE with evidence; never use any keyword more than twice across the entire resume. When a PRIORITY KEYWORDS list is provided: every must-have keyword the candidate's data genuinely supports must appear once in TECHNICAL SKILLS and once inside a [BULLET] (or [SUMMARY]) with supporting evidence. Skip keywords the candidate's data cannot support — never invent experience to cover a keyword.
+6. ACRONYMS: In TECHNICAL SKILLS, write the first mention of an acronym as the spelled-out form plus the acronym — "Amazon Web Services (AWS)", "Continuous Integration/Continuous Deployment (CI/CD)" — but only when you are certain of the standard expansion; otherwise keep the acronym alone. Everywhere else, use the same form the job description uses.
+7. ORDERING IS MANDATORY: every section must appear in strict reverse-chronological order by END DATE — most recent end date first. "Present" is the most recent possible end date. This cannot be changed for any reason, including relevance to the job. Recency weighting affects bullet count and detail, not the order entries appear. The candidate's entries are pre-sorted — output them in the EXACT ORDER they are provided.
+8. BULLET ORDER WITHIN AN ENTRY: order each entry's bullets by relevance to the target job, most relevant first. The FIRST bullet of the MOST RECENT job must address the job description's single most important requirement that the candidate's data supports — recruiters read that line first.
+9. VERB VARIETY: start each bullet with a concrete action verb; never reuse the same opening verb twice in the resume; prefer verbs drawn from the candidate's own source data. Do not use: spearheaded, leveraged, championed, orchestrated, utilized.
+10. The entire output must represent one page of content — be selective and concise but always use the full page.
+11. Never fabricate or exaggerate. Reframe truthfully to match the role.
+12. NEVER invent, modify, or estimate any date. Copy dates exactly as given in the candidate's profile data. If a date was not provided, omit it entirely rather than guessing.
+13. Copy job titles exactly as provided. Some titles include a market-standard form with the internal title in parentheses — keep both, unchanged.
+14. MINIMUM BULLETS: Every work experience entry and every project entry that appears in the resume MUST have at least 2 [BULLET] lines. If page space is tight, drop an entire entry rather than leaving any entry with only 1 bullet.`
 
 export interface ResumeData {
   jobs: Job[]
@@ -92,6 +101,13 @@ function formatDate(val: string): string {
   return `${short[m-1]} ${year}`
 }
 
+// "Display Title (Internal Title)" when a market-standard alias is set —
+// the honest form of title alignment (see docs/ats-research.md §2).
+function resumeTitle(j: Job): string {
+  const alias = j.displayTitle?.trim()
+  return alias && alias !== j.title ? `${alias} (${j.title})` : j.title
+}
+
 // ─── Page budget calculator ───────────────────────────────────────────────────
 // Approximates the LaTeX renderer (Jake's Resume template, server/latex.ts):
 // letterpaper with 0.5in side margins, 11pt Computer Modern (~13.6pt lines).
@@ -109,13 +125,15 @@ const PDF = {
   projectHdr: 22,   // \resumeProjectHeading (single row)
   skillRow: 17,     // one \small skill line (wrap allowance)
   bullet: 16,       // one \small bullet at 11pt (wrap allowance)
+  summaryText: 40,  // 2–3 wrapped \small summary lines
 }
 
-function bulletBudget(nJobs: number, nEdus: number, nProjects: number, nSkillCats: number): number {
+function bulletBudget(nJobs: number, nEdus: number, nProjects: number, nSkillCats: number, hasSummary: boolean): number {
   const usable = PDF.pageH - PDF.mt - PDF.mb
   const fixed =
     PDF.header +
-    4 * PDF.sectionHdr +
+    (hasSummary ? 5 : 4) * PDF.sectionHdr +
+    (hasSummary ? PDF.summaryText : 0) +
     nEdus     * PDF.eduEntry  + Math.max(0, nEdus - 1)  * PDF.eduGap +
     nJobs     * PDF.jobHdr    + Math.max(0, nJobs - 1)  * PDF.jobGap +
     nProjects * PDF.projectHdr +
@@ -124,72 +142,133 @@ function bulletBudget(nJobs: number, nEdus: number, nProjects: number, nSkillCat
   return Math.max(4, Math.floor((usable - fixed) / PDF.bullet * 0.80) + 2)
 }
 
-export function buildSelectionMessage(
-  data: ResumeData,
-  jobDescription: string,
-): string {
-  const { jobs, projects } = data
-
-  const jobList = sortByRecency(jobs).map((j, idx) => {
-    const start = formatDate(j.startDate)
-    const end = j.current ? 'Present' : formatDate(j.endDate)
-    const bullets = j.bullets?.trim()
-      ? j.bullets.split('\n').map(l => l.trim()).filter(Boolean).join('; ')
-      : ''
-    const context = [j.description?.trim(), bullets].filter(Boolean).join(' | ')
-    const recency = idx === 0 ? 'MOST RECENT' : recencyLabel(j.endDate, j.current)
-    return `[ID:${j.id}] [${recency}] ${j.title} at ${j.company} (${[start, end].filter(Boolean).join(' – ')})${context ? '\n  ' + context : ''}`
-  }).join('\n\n')
-
-  const projectList = sortProjectsByRecency(projects).map((p, idx) => {
-    const bullets = p.bullets?.trim()
-      ? p.bullets.split('\n').map(l => l.trim()).filter(Boolean).join('; ')
-      : ''
-    const tech = p.technologies ? `Tech: ${p.technologies}` : ''
-    const context = [tech, p.description?.trim(), bullets].filter(Boolean).join(' | ')
-    const recency = idx === 0 ? 'MOST RECENT' : (p.endDate ? recencyLabel(p.endDate, false) : '')
-    const recencyTag = recency ? ` [${recency}]` : ''
-    return `[ID:${p.id}]${recencyTag} ${p.name}${context ? '\n  ' + context : ''}`
-  }).join('\n\n')
-
+// ─── Stage 1: requirement extraction (JD only — the model never needs the
+// profile to parse a posting; keeping this prompt small is the main latency
+// win on a large local model). Phrasing stays VERBATIM: paraphrasing the JD
+// measurably degrades retrieval matching (docs/retrieval-research.md §3).
+export function buildExtractionMessage(jobDescription: string): string {
   return (
     `Job posting:\n${jobDescription}\n\n` +
     `---\n\n` +
-    `Work experience (listed most-recent first):\n${jobList || '(none)'}\n\n` +
-    `Projects (listed most-recent first):\n${projectList || '(none)'}\n\n` +
+    `EXTRACTION RULES:\n` +
+    `1. targetTitle: the posting's job title as a standard market title (e.g. "Senior Software Engineer").\n` +
+    `2. mustHave: up to 12 hard skills, tools, platforms, certifications, or methodologies that are explicitly required, sit in the requirements/qualifications section, or repeat across the posting. Copy the posting's EXACT phrasing (keep "React.js" as "React.js") — do not paraphrase. Treat "preferred" qualifications as required.\n` +
+    `3. niceToHave: up to 8 secondary or bonus terms.\n` +
+    `4. Never include soft-skill filler ("team player", "fast-paced environment", "communication", "detail-oriented").\n\n` +
+    `Return ONLY this JSON:\n` +
+    `{"targetTitle":"...","mustHave":["..."],"niceToHave":["..."]}`
+  )
+}
+
+// ─── Stage 2: listwise confirmation over the deterministically scored
+// shortlist. The engine searches; the model curates — the one LLM-ranking
+// mode the retrieval research endorses.
+export function buildShortlistMessage(
+  data: ResumeData,
+  retrieval: RetrievalResult,
+  keywords: JdKeywords | null,
+): string {
+  const jobById = new Map(data.jobs.map(j => [j.id, j]))
+  const projectById = new Map(data.projects.map(p => [p.id, p]))
+
+  const jobLines = retrieval.rankedJobs.map(r => {
+    const j = jobById.get(r.id)
+    if (!j) return ''
+    const dates = [formatDate(j.startDate), j.current ? 'Present' : formatDate(j.endDate)].filter(Boolean).join(' – ')
+    const recency = recencyLabel(j.endDate, j.current)
+    const matched = r.matched.length > 0
+      ? ` | evidence for: ${r.matched.slice(0, 4).join(', ')}${r.matched.length > 4 ? ` (+${r.matched.length - 4} more)` : ''}`
+      : ' | no requirement evidence found'
+    return `[ID:${r.id}] score ${r.score.toFixed(2)}${recency ? ` [${recency}]` : ''} ${resumeTitle(j)} at ${j.company} (${dates})${matched}`
+  }).filter(Boolean).join('\n')
+
+  const projectLines = retrieval.rankedProjects.map(r => {
+    const p = projectById.get(r.id)
+    if (!p) return ''
+    const matched = r.matched.length > 0
+      ? ` | evidence for: ${r.matched.slice(0, 4).join(', ')}`
+      : ' | no requirement evidence found'
+    const tech = p.technologies ? ` (${p.technologies})` : ''
+    return `[ID:${r.id}] score ${r.score.toFixed(2)} ${p.name}${tech}${matched}`
+  }).filter(Boolean).join('\n')
+
+  const target = keywords?.targetTitle ? `Target role: ${keywords.targetTitle}\n\n` : ''
+
+  return (
+    target +
+    `Work experience, ranked by the relevance engine (best first):\n${jobLines || '(none)'}\n\n` +
+    `Projects, ranked by the relevance engine (best first):\n${projectLines || '(none)'}\n\n` +
     `---\n\n` +
-    `Select only what genuinely strengthens this specific application. A strong one-page resume typically shows 2-4 work experiences and 1-2 projects — quality over quantity.\n\n` +
+    `A strong one-page resume typically shows 2-4 work experiences and 1-2 projects — quality over quantity.\n\n` +
     `SELECTION RULES:\n` +
-    `1. Always include the [MOST RECENT] work experience unless it is completely unrelated to this role.\n` +
-    `2. Include an older job only if it directly matches the role's core requirements — not just because it exists.\n` +
-    `3. Include a project only if it clearly demonstrates skills called for in this role. When in doubt, leave it out.\n` +
-    `4. Order your selections by relevance to this role (most relevant first).\n\n` +
+    `1. Trust the ranking unless you see a clear semantic mismatch the scores missed (e.g. same tools, unrelated domain).\n` +
+    `2. Always include the most recent work experience unless it is completely unrelated to this role.\n` +
+    `3. WEIGHT RECENCY: when two entries are comparably relevant, always prefer the more recent one. A job that ended more than ~2 years ago must uniquely cover a core requirement to earn its place.\n` +
+    `4. Drop entries marked "no requirement evidence found" unless they are the most recent job.\n` +
+    `5. Keep your output ordered most-relevant first.\n\n` +
     `Return ONLY this JSON:\n` +
     `{"jobIds":["..."],"projectIds":["..."]}`
   )
 }
 
-export function parseSelectionIds(
+// Sanitizes a model-emitted keyword list: strings only, trimmed, deduped
+// case-insensitively, capped in count and length.
+function cleanKeywords(raw: unknown, cap: number): string[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const kw = item.trim()
+    const key = kw.toLowerCase()
+    if (!kw || kw.length > 60 || seen.has(key)) continue
+    seen.add(key)
+    out.push(kw)
+    if (out.length >= cap) break
+  }
+  return out
+}
+
+export function parseExtraction(text: string): JdKeywords | null {
+  try {
+    const match = text.match(/\{[\s\S]*\}/)
+    if (!match) return null
+    const parsed = JSON.parse(match[0]) as { targetTitle?: unknown, mustHave?: unknown, niceToHave?: unknown }
+    const mustHave = cleanKeywords(parsed.mustHave, 12)
+    const niceToHave = cleanKeywords(parsed.niceToHave, 8)
+      .filter(kw => !mustHave.some(m => m.toLowerCase() === kw.toLowerCase()))
+    const targetTitle = typeof parsed.targetTitle === 'string' ? parsed.targetTitle.trim().slice(0, 80) : ''
+    return mustHave.length > 0 || niceToHave.length > 0 || targetTitle
+      ? { targetTitle, mustHave, niceToHave }
+      : null
+  } catch {
+    return null
+  }
+}
+
+// Fallback on any parse failure is the engine's own ranking — the shortlist
+// call can only refine the deterministic result, never lose it.
+export function parseShortlist(
   text: string,
-  allJobIds: string[],
-  allProjectIds: string[],
+  rankedJobIds: string[],
+  rankedProjectIds: string[],
 ): { jobIds: string[], projectIds: string[] } {
   try {
     const match = text.match(/\{[\s\S]*\}/)
     if (!match) throw new Error('no json')
     const parsed = JSON.parse(match[0]) as { jobIds?: unknown, projectIds?: unknown }
     const jobIds = Array.isArray(parsed.jobIds)
-      ? (parsed.jobIds as string[]).filter(id => allJobIds.includes(id))
-      : allJobIds
+      ? (parsed.jobIds as string[]).filter(id => rankedJobIds.includes(id))
+      : rankedJobIds
     const projectIds = Array.isArray(parsed.projectIds)
-      ? (parsed.projectIds as string[]).filter(id => allProjectIds.includes(id))
-      : allProjectIds
-    if (jobIds.length === 0 && allJobIds.length > 0) {
-      return { jobIds: allJobIds.slice(0, 1), projectIds }
+      ? (parsed.projectIds as string[]).filter(id => rankedProjectIds.includes(id))
+      : rankedProjectIds
+    if (jobIds.length === 0 && rankedJobIds.length > 0) {
+      return { jobIds: rankedJobIds.slice(0, 1), projectIds }
     }
     return { jobIds, projectIds }
   } catch {
-    return { jobIds: allJobIds, projectIds: allProjectIds }
+    return { jobIds: rankedJobIds, projectIds: rankedProjectIds }
   }
 }
 
@@ -201,13 +280,14 @@ export function trimToPageFit(
   projectIds: string[],
   nEdus: number,
   nSkillCats: number,
+  hasSummary: boolean,
 ): { jobIds: string[], projectIds: string[] } {
   let jIds = [...jobIds]
   let pIds = [...projectIds]
   while (true) {
     const n = jIds.length + pIds.length
     if (n === 0) break
-    const budget = bulletBudget(jIds.length, nEdus, pIds.length, nSkillCats)
+    const budget = bulletBudget(jIds.length, nEdus, pIds.length, nSkillCats, hasSummary)
     // Each entry needs room for ~3 bullets (recent get 3, older get 2)
     if (budget >= 3 * n) break
     if (pIds.length > 0) {
@@ -231,20 +311,16 @@ function groupSkillsByCategory(skills: Skill[]): Record<string, string[]> {
 }
 
 function buildProfileContext(data: ResumeData, profile: Profile | null): string {
-  const { jobs, education, projects, skills } = data
+  const { jobs, projects, skills } = data
   const sections: string[] = []
   let sourceIdx = 1
 
   if (profile) {
+    // Contact fields are deliberately absent — the header is composed
+    // deterministically by buildHeaderLines, never written by the model.
     const lines = [
-      profile.name     && `Name: ${profile.name}`,
-      profile.email    && `Email: ${profile.email}`,
-      profile.phone    && `Phone: ${profile.phone}`,
-      profile.location && `Location: ${profile.location}`,
-      profile.website  && `Website: ${profile.website}`,
-      profile.linkedin && `LinkedIn: ${profile.linkedin}`,
-      profile.github   && `GitHub: ${profile.github}`,
-      profile.summary  && `Summary: ${profile.summary}`,
+      profile.name    && `Name: ${profile.name}`,
+      profile.summary && `Summary: ${profile.summary}`,
     ].filter(Boolean)
     if (lines.length) sections.push('## CANDIDATE PROFILE\n' + lines.join('\n'))
   }
@@ -264,7 +340,7 @@ function buildProfileContext(data: ResumeData, profile: Profile | null): string 
           : []
         const numberedBullets = bulletLines.map(l => `[S${sourceIdx++}] ${l}`).join('\n')
         return [
-          `[#${i + 1}] ${j.title} at ${j.company}${loc} (${dates})${tag}`,
+          `[#${i + 1}] ${resumeTitle(j)} at ${j.company}${loc} (${dates})${tag}`,
           j.description && `Description: ${j.description}`,
           numberedBullets || undefined,
         ].filter(Boolean).join('\n')
@@ -272,23 +348,8 @@ function buildProfileContext(data: ResumeData, profile: Profile | null): string 
     )
   }
 
-  if (education.length > 0) {
-    sections.push(
-      '## EDUCATION (entries numbered — output in this exact order, #1 first)\n' +
-      sortByRecency(education).map((e, i) => {
-        const start = formatDate(e.startDate)
-        const end = e.current ? 'Present' : formatDate(e.endDate)
-        const dates = [start, end].filter(Boolean).join(' – ')
-        const degree = [e.degree, e.field].filter(Boolean).join(' in ')
-        const minor = e.minor ? `, Minor in ${e.minor}` : ''
-        const loc = e.location ? ` | ${e.location}` : ''
-        const gpa = e.gpa ? ` | GPA: ${e.gpa}` : ''
-        const recency = recencyLabel(e.endDate, e.current)
-        const tag = recency ? ` [${recency}]` : ''
-        return `[#${i + 1}] ${degree}${minor} — ${e.institution}${loc} (${dates})${tag}${gpa}${e.description ? '\nNotes: ' + e.description : ''}`
-      }).join('\n\n')
-    )
-  }
+  // Education is deliberately absent — like the header, it is composed
+  // deterministically by buildEducationLines, never written by the model.
 
   if (projects.length > 0) {
     sections.push(
@@ -323,13 +384,14 @@ function buildProfileContext(data: ResumeData, profile: Profile | null): string 
   return sections.join('\n\n')
 }
 
-function pageFillInstruction(data: ResumeData): string {
+function pageFillInstruction(data: ResumeData, hasSummary: boolean): string {
   const byCategory = groupSkillsByCategory(data.skills)
   const budget = bulletBudget(
     data.jobs.length,
     data.education.length,
     data.projects.length,
     Object.keys(byCategory).length,
+    hasSummary,
   )
   const minRequired = 2 * (data.jobs.length + data.projects.length)
   const effective = Math.max(budget, minRequired)
@@ -338,21 +400,150 @@ function pageFillInstruction(data: ResumeData): string {
     `across all work experience and project entries combined. You MUST write exactly that many [BULLET] lines — ` +
     `no more (it will overflow the page) and no fewer (it will leave blank space). ` +
     `Every entry that appears must receive at least 2 bullets. ` +
-    `Distribute remaining bullets to recent/relevant positions.`
+    `Allocate the remaining bullets top-down by recency: the most recent role gets the largest share, ` +
+    `and within WORK EXPERIENCE an older entry must never have more bullets than a more recent one.`
   )
+}
+
+// The resume header is deterministic profile data — composing it here (instead
+// of asking the LLM to echo it) removes a whole class of typo/omission risk.
+// The renderer turns URL parts into labeled hyperlinks (see server/latex.ts).
+export function buildHeaderLines(profile: Profile | null): string {
+  if (!profile) return ''
+  const contact = [profile.location, profile.email, profile.phone, profile.website, profile.linkedin, profile.github]
+    .map(s => s?.trim())
+    .filter(Boolean)
+    .join(' | ')
+  const lines = [
+    profile.name?.trim() && `[NAME]${profile.name.trim()}`,
+    contact && `[CONTACT]${contact}`,
+  ].filter(Boolean)
+  return lines.join('\n')
+}
+
+// Education is deterministic profile data too — never LLM-generated. Jake's
+// Resume layout: Institution | Location on top, Degree | Dates beneath
+// (GPA folded into the degree text since dates occupy that column).
+export function buildEducationLines(education: EducationEntry[]): string {
+  if (education.length === 0) return ''
+  const entries = sortByRecency(education).map(e => {
+    const degree = [e.degree, e.field].filter(Boolean).join(' in ')
+      + (e.minor ? `, Minor in ${e.minor}` : '')
+      + (e.gpa ? ` (GPA: ${e.gpa})` : '')
+    const dates = e.current
+      ? (e.endDate ? `Expected ${formatDate(e.endDate)}` : [formatDate(e.startDate), 'Present'].filter(Boolean).join(' – '))
+      : [formatDate(e.startDate), formatDate(e.endDate)].filter(Boolean).join(' – ')
+    return `[EDU_INST]${e.institution}\t${e.location ?? ''}\n[EDU_DEG]${degree}\t${dates}`
+  })
+  return ['[SECTION]EDUCATION', ...entries].join('\n')
+}
+
+// Defense against the model echoing statically-composed content despite
+// rule 1: drops header/education tag lines and any EDUCATION section
+// wholesale (including stray bullets inside it, which would otherwise
+// re-attach to the previous entry when parsed).
+export function stripStaticTags(text: string): string {
+  const out: string[] = []
+  let inEducation = false
+  for (const line of text.split('\n')) {
+    if (line.startsWith('[SECTION]')) {
+      inEducation = line.slice(9).trim().toUpperCase() === 'EDUCATION'
+      if (inEducation) continue
+    }
+    if (inEducation) continue
+    if (line.startsWith('[NAME]') || line.startsWith('[CONTACT]')
+      || line.startsWith('[EDU_INST]') || line.startsWith('[EDU_DEG]')) continue
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
+// Final document assembly: statically-composed header + summary (hoisted from
+// wherever the model emitted it) + education + the model's cleaned sections.
+export function assembleResume(header: string, education: string, modelOutput: string): string {
+  const cleaned = stripCitations(enforceChronologicalOrder(stripStaticTags(modelOutput))).trim()
+  const lines = cleaned ? cleaned.split('\n') : []
+  const summary = lines.filter(l => l.startsWith('[SUMMARY]'))
+  const rest = lines.filter(l => !l.startsWith('[SUMMARY]')).join('\n').trim()
+  return [header, summary.join('\n'), education, rest].filter(Boolean).join('\n')
+}
+
+// Mirrors the [S#] numbering that buildProfileContext assigns to bullet lines
+// (jobs by recency, then projects by recency, one counter). Keep the two in
+// sync — the evidence map cites these numbers.
+function numberedSourceMap(data: ResumeData): Map<string, string> {
+  const map = new Map<string, string>()
+  let sourceIdx = 1
+  for (const j of sortByRecency(data.jobs)) {
+    for (const b of (j.bullets ?? '').split('\n').map(l => l.trim()).filter(Boolean)) {
+      map.set(`${j.id} ${b}`, `S${sourceIdx++}`)
+    }
+  }
+  for (const p of sortProjectsByRecency(data.projects)) {
+    for (const b of (p.bullets ?? '').split('\n').map(l => l.trim()).filter(Boolean)) {
+      map.set(`${p.id} ${b}`, `S${sourceIdx++}`)
+    }
+  }
+  return map
+}
+
+// Deterministic retrieval verdicts rendered for the generation prompt: which
+// source bullets are the strongest evidence per requirement, and which
+// requirements are gaps that must NOT be papered over (rule 5).
+function evidenceBlock(data: ResumeData, retrieval: RetrievalResult | null): string {
+  if (!retrieval || retrieval.requirements.length === 0) return ''
+  const sources = numberedSourceMap(data)
+  const lines: string[] = []
+  for (const req of retrieval.requirements) {
+    const label = req.required ? 'Must-have' : 'Nice-to-have'
+    const cites = req.topEvidence
+      .map(e => sources.get(`${e.parentId} ${e.rawText}`))
+      .filter((s): s is string => Boolean(s))
+      .slice(0, 2)
+    if (!req.covered) {
+      if (req.required) lines.push(`${label} "${req.text}" — NO SUPPORTING EVIDENCE in the profile. This is a gap: do not fabricate coverage; omit rather than stretch.`)
+    } else if (cites.length > 0) {
+      lines.push(`${label} "${req.text}" — strongest source bullets: [${cites.join('], [')}]`)
+    }
+  }
+  if (lines.length === 0) return ''
+  return (
+    'EVIDENCE MAP (deterministic retrieval over the candidate profile):\n' +
+    lines.join('\n') +
+    '\nUse these citations when selecting and ordering bullets (rule 8): within each entry, cited evidence bullets come first, and the top cited bullet for the most important requirement leads the most recent role.\n\n'
+  )
+}
+
+// The extracted-keyword block injected into generation/refine prompts.
+// Coverage rules live in SYSTEM_PROMPT rule 5; this supplies the data.
+function keywordsBlock(keywords: JdKeywords | null): string {
+  if (!keywords) return ''
+  const lines = [
+    'PRIORITY KEYWORDS (extracted from this job description):',
+    keywords.targetTitle && `Target title: ${keywords.targetTitle}`,
+    keywords.mustHave.length > 0 && `Must-have: ${keywords.mustHave.join(', ')}`,
+    keywords.niceToHave.length > 0 && `Nice-to-have: ${keywords.niceToHave.join(', ')}`,
+    'Apply rule 5: cover each supported must-have once in TECHNICAL SKILLS and once in an evidence bullet; skip unsupported ones; no keyword more than twice.',
+  ].filter(Boolean)
+  return lines.join('\n') + '\n\n'
 }
 
 export function buildUserMessage(
   data: ResumeData,
   profile: Profile | null,
   jobDescription: string,
+  keywords: JdKeywords | null = null,
+  retrieval: RetrievalResult | null = null,
 ): string {
   const profileContext = buildProfileContext(data, profile)
+  const hasSummary = Boolean(profile?.summary?.trim())
   return (
     `Here is the candidate's full profile:\n\n${profileContext}\n\n` +
     `---\n\nTarget job description:\n\n${jobDescription}\n\n` +
     `---\n\n` +
-    `${pageFillInstruction(data)}\n\n` +
+    keywordsBlock(keywords) +
+    evidenceBlock(data, retrieval) +
+    `${pageFillInstruction(data, hasSummary)}\n\n` +
     `Write the tailored resume in the exact tagged format specified.`
   )
 }
@@ -363,17 +554,22 @@ export function buildRefineMessage(
   jobDescription: string,
   currentResume: string,
   instructions: string,
+  keywords: JdKeywords | null = null,
+  retrieval: RetrievalResult | null = null,
 ): string {
   const profileContext = buildProfileContext(data, profile)
+  const hasSummary = Boolean(profile?.summary?.trim())
   const refinementNote = instructions.trim()
-    || 'Improve the quality of all bullets — ensure every entry has at least 2 strong, specific bullets tightly aligned with the job description. Strengthen weak bullets with more concrete impact and relevant keywords.'
+    || 'Improve the quality of all bullets — ensure every entry has at least 2 strong, specific bullets tightly aligned with the job description. Strengthen weak bullets with more concrete impact, keeping rule 5 (coverage, not frequency — no keyword more than twice).'
   return (
     `Here is the candidate's full profile:\n\n${profileContext}\n\n` +
     `---\n\nTarget job description:\n\n${jobDescription}\n\n` +
     `---\n\nCurrent resume draft to refine:\n\n${currentResume}\n\n` +
     `---\n\nRefinement instructions: ${refinementNote}\n\n` +
     `---\n\n` +
-    `${pageFillInstruction(data)}\n\n` +
+    keywordsBlock(keywords) +
+    evidenceBlock(data, retrieval) +
+    `${pageFillInstruction(data, hasSummary)}\n\n` +
     `Output the complete revised resume in the exact tagged format. Preserve everything that works well and improve what doesn't.`
   )
 }
@@ -498,7 +694,8 @@ function _enforceChronologicalOrder(text: string): string {
       } else if (name === 'PROJECTS') {
         entries = collectEntries('[PROJECT]')
       } else if (name === 'EDUCATION') {
-        entries = collectEntries('[EDU_INST]')
+        // Jake's layout: dates sit on the [EDU_DEG] line (location on [EDU_INST])
+        entries = collectEntries('[EDU_INST]', '[EDU_DEG]')
       } else {
         while (i < lines.length && !lines[i].startsWith('[SECTION]')) {
           out.push(lines[i++])

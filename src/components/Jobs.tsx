@@ -8,7 +8,7 @@ import { Button, Input, Textarea, Checkbox, SectionHeader, EmptyState, Card, For
 type JobForm = Omit<Job, 'id'>
 
 const empty: JobForm = {
-  company: '', title: '', location: '',
+  company: '', title: '', displayTitle: '', location: '',
   startDate: '', endDate: '', current: false,
   description: '', bullets: '',
 }
@@ -72,7 +72,11 @@ export default function Jobs() {
               <Card key={job.id} className="p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-zinc-100">{job.title}</p>
+                    <p className="text-sm font-semibold text-zinc-100">
+                      {job.displayTitle?.trim() && job.displayTitle.trim() !== job.title
+                        ? `${job.displayTitle.trim()} (${job.title})`
+                        : job.title}
+                    </p>
                     <p className="text-sm text-zinc-400">{job.company}{job.location ? ` · ${job.location}` : ''}</p>
                     <p className="text-xs text-zinc-600 mt-0.5">
                       {formatMonthYear(job.startDate)} – {job.current ? 'Present' : formatMonthYear(job.endDate)}
@@ -122,7 +126,10 @@ function JobForm({ form, setForm, f, onSave, onCancel, saveLabel }: FormProps) {
       <Input label="Job Title *" placeholder="Software Engineer" {...f('title')} />
       <Input label="Company *" placeholder="Acme Corp" {...f('company')} />
       <Input label="Location" placeholder="San Francisco, CA" {...f('location')} />
-      <div />
+      <Input label="Market Title (optional)"
+        placeholder="Standard title, if yours is internal jargon"
+        title='Shown on the resume as "Market Title (Job Title)" — recruiters search by standard titles, and title match is the biggest measured interview lever'
+        {...f('displayTitle')} />
       <MonthYearPicker label="Start Date" value={form.startDate} onChange={val => setForm(prev => ({ ...prev, startDate: val }))} />
       <div className="flex flex-col gap-2">
         <MonthYearPicker label="End Date" value={form.endDate} disabled={form.current} onChange={val => setForm(prev => ({ ...prev, endDate: val }))} />

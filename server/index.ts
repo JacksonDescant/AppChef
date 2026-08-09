@@ -7,6 +7,9 @@ import { checkTectonic, compileOnePageResume, serialized, warmUp, LatexError } f
 import { db, initDb } from './db/index'
 import { jobs, education, projects, skills, targetJobs, applications, settings, profile, savedResumes } from './db/schema'
 import { eq } from 'drizzle-orm'
+import { indexStatus, reindexChunks, scheduleEmbedding, scheduleReindex } from './chunks'
+import { retrieve } from './retrieval'
+import type { RequirementInput } from '../src/types'
 
 const app = express()
 app.use(cors({ origin: ['http://localhost:5173', 'http://localhost:4173'] }))
@@ -20,6 +23,7 @@ function crudRoutes<T extends { id: string }>(
   router: express.Router,
   path: string,
   table: Parameters<typeof db.select>[0] extends never ? never : any, // drizzle table
+  onChange?: () => void,
 ) {
   router.get(path, (_req, res) => {
     res.json(db.select().from(table).all())
@@ -28,28 +32,51 @@ function crudRoutes<T extends { id: string }>(
   router.post(path, (req, res) => {
     const item = { id: randomUUID(), ...req.body } as T
     db.insert(table).values(item).run()
+    onChange?.()
     res.status(201).json(item)
   })
 
   router.put(`${path}/:id`, (req, res) => {
     const { id } = req.params
     db.update(table).set(req.body).where(eq(table.id, id)).run()
+    onChange?.()
     res.json({ id, ...req.body })
   })
 
   router.delete(`${path}/:id`, (req, res) => {
     db.delete(table).where(eq(table.id, req.params.id)).run()
+    onChange?.()
     res.status(204).end()
   })
 }
 
 const router = express.Router()
 
-crudRoutes(router, '/jobs', jobs)
+// Retrieval-indexed tables rebuild their chunk index after mutations
+crudRoutes(router, '/jobs', jobs, scheduleReindex)
 crudRoutes(router, '/education', education)
-crudRoutes(router, '/projects', projects)
-crudRoutes(router, '/skills', skills)
+crudRoutes(router, '/projects', projects, scheduleReindex)
+crudRoutes(router, '/skills', skills, scheduleReindex)
 crudRoutes(router, '/target-jobs', targetJobs)
+
+// ─── Retrieval (docs/retrieval-research.md) ─────────────────────────────────
+
+router.post('/retrieve', (req, res) => {
+  const raw = (req.body as { requirements?: unknown })?.requirements
+  const requirements: RequirementInput[] = Array.isArray(raw)
+    ? (raw as RequirementInput[])
+        .filter(r => typeof r?.text === 'string' && r.text.trim())
+        .map(r => ({ text: r.text.trim().slice(0, 200), required: Boolean(r.required) }))
+        .slice(0, 30)
+    : []
+  retrieve(requirements)
+    .then(result => res.json(result))
+    .catch((e: Error) => res.status(500).json({ error: e.message }))
+})
+
+router.get('/retrieval-status', (_req, res) => {
+  res.json(indexStatus())
+})
 
 // ─── Applications (with CSV export) ─────────────────────────────────────────
 
@@ -202,4 +229,11 @@ app.listen(PORT, () => {
     if (ok) warmUp()
     else console.warn('[pdf] tectonic not found — /api/pdf disabled. Install with: brew install tectonic')
   })
+  // Build the retrieval index at boot; embedding model downloads on first run
+  try {
+    reindexChunks()
+    scheduleEmbedding()
+  } catch (e) {
+    console.warn(`[retrieval] index unavailable: ${(e as Error).message}`)
+  }
 })

@@ -4,6 +4,9 @@ export const jobs = sqliteTable('jobs', {
   id:          text('id').primaryKey(),
   company:     text('company').notNull(),
   title:       text('title').notNull(),
+  // Market-standard alias for a non-standard internal title; rendered as
+  // "Display Title (Internal Title)" so the resume stays background-check honest.
+  displayTitle: text('display_title').notNull().default(''),
   location:    text('location').notNull().default(''),
   startDate:   text('start_date').notNull().default(''),
   endDate:     text('end_date').notNull().default(''),

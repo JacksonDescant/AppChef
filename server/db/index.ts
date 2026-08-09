@@ -10,6 +10,8 @@ const sqlite = new Database(DB_PATH)
 sqlite.pragma('journal_mode = WAL')
 
 export const db = drizzle(sqlite, { schema })
+// Raw handle for the retrieval index (FTS5 + vector BLOBs in server/chunks.ts)
+export const rawDb = sqlite
 
 // Auto-create tables on startup (idempotent)
 export function initDb() {
@@ -18,6 +20,7 @@ export function initDb() {
       id TEXT PRIMARY KEY,
       company TEXT NOT NULL DEFAULT '',
       title TEXT NOT NULL DEFAULT '',
+      display_title TEXT NOT NULL DEFAULT '',
       location TEXT NOT NULL DEFAULT '',
       start_date TEXT NOT NULL DEFAULT '',
       end_date TEXT NOT NULL DEFAULT '',
@@ -107,12 +110,31 @@ export function initDb() {
       max_tokens INTEGER NOT NULL DEFAULT 32000
     );
 
+    -- Retrieval index (docs/retrieval-research.md): one row per bullet/skill/entry
+    -- chunk; embeddings are normalized Float32 BLOBs filled asynchronously.
+    CREATE TABLE IF NOT EXISTS chunks (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      parent_kind TEXT NOT NULL,
+      parent_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      raw_text TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      model_id TEXT NOT NULL DEFAULT '',
+      dims INTEGER NOT NULL DEFAULT 0,
+      embedding BLOB,
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, chunk_id UNINDEXED);
+
     -- Seed singleton rows if not present
     INSERT OR IGNORE INTO profile (id) VALUES (1);
     INSERT OR IGNORE INTO settings (id) VALUES (1);
   `)
 
   // Additive migrations for existing DBs
+  try { sqlite.exec(`ALTER TABLE jobs ADD COLUMN display_title TEXT NOT NULL DEFAULT ''`) } catch {}
   try { sqlite.exec(`ALTER TABLE education ADD COLUMN minor TEXT NOT NULL DEFAULT ''`) } catch {}
   try { sqlite.exec(`ALTER TABLE projects ADD COLUMN start_date TEXT NOT NULL DEFAULT ''`) } catch {}
   try { sqlite.exec(`ALTER TABLE projects ADD COLUMN end_date TEXT NOT NULL DEFAULT ''`) } catch {}

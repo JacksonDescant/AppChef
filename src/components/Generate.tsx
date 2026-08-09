@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import {
   Sparkles, Copy, Check, Wifi, WifiOff, ChevronRight,
   FileDown, Link, Loader2, Bookmark, BookmarkCheck, Trash2, FileText, RefreshCw,
@@ -7,12 +7,15 @@ import { useSection } from '../hooks/useSection'
 import { useSettings } from '../hooks/useSettings'
 import { streamCompletion, checkConnection } from '../llm'
 import {
-  SYSTEM_PROMPT, SELECTION_SYSTEM_PROMPT,
-  buildUserMessage, buildRefineMessage, buildSelectionMessage, parseSelectionIds,
-  enforceChronologicalOrder, stripCitations, trimToPageFit,
+  SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, SHORTLIST_SYSTEM_PROMPT,
+  buildUserMessage, buildRefineMessage, buildExtractionMessage, buildShortlistMessage,
+  parseExtraction, parseShortlist,
+  assembleResume, buildEducationLines, buildHeaderLines, trimToPageFit,
 } from '../prompts'
+import type { JdKeywords } from '../prompts'
+import { computeCoverage } from '../lib/coverage'
 import { Button, Card } from './ui'
-import type { Job, EducationEntry, Project, Skill, SavedResume, Profile } from '../types'
+import type { Job, EducationEntry, Project, Skill, SavedResume, Profile, RequirementInput, RetrievalResult } from '../types'
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-US', {
@@ -50,7 +53,9 @@ export default function Generate() {
   const [justSaved, setJustSaved] = useState(false)
   const [connected, setConnected] = useState<boolean | null>(null)
   const [refineInstructions, setRefineInstructions] = useState('')
-  const [phase, setPhase] = useState<'idle' | 'selecting' | 'generating'>('idle')
+  const [phase, setPhase] = useState<'idle' | 'extracting' | 'scoring' | 'shortlisting' | 'generating'>('idle')
+  const [keywords, setKeywords] = useState<JdKeywords | null>(null)
+  const [retrieval, setRetrieval] = useState<RetrievalResult | null>(null)
 
   // Live PDF preview
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null)
@@ -99,6 +104,11 @@ export default function Generate() {
 
   const profileEmpty = jobs.length === 0 && education.length === 0 && projects.length === 0 && skills.length === 0
 
+  const coverage = useMemo(
+    () => (keywords && output && !streaming ? computeCoverage(output, keywords) : null),
+    [keywords, output, streaming],
+  )
+
   async function fetchFromUrl() {
     const url = urlInput.trim()
     if (!url) return
@@ -122,10 +132,12 @@ export default function Generate() {
     if (!jobDescription.trim()) { setError('Paste a job description first.'); return }
     if (profileEmpty) { setError('Add some experience in the other sections first.'); return }
     setError(''); setOutput(''); setJustSaved(false); setLoading(true); setStreaming(false)
+    setKeywords(null); setRetrieval(null)
 
-    // ── Phase 1: select relevant entries ─────────────────────────────────────
-    setPhase('selecting')
     const skillCatCount = new Set(skills.map(s => s.category || 'General')).size
+    const hasSummary = Boolean(profile?.summary?.trim())
+    let jdKeywords: JdKeywords | null = null
+    let retrievalResult: RetrievalResult | null = null
 
     // Default fallback: all entries sorted by recency
     const jobsByRecency     = [...jobs].sort((a, b) =>
@@ -137,23 +149,67 @@ export default function Generate() {
     let orderedJobs     = jobsByRecency
     let orderedProjects = projectsByRecency
 
-    if (jobs.length > 0 || projects.length > 0) {
+    // ── Phase 1: extract requirements from the JD (small, JD-only prompt) ────
+    setPhase('extracting')
+    try {
+      let extText = ''
+      for await (const chunk of streamCompletion({
+        endpoint: settings.llamaEndpoint, model: settings.modelName,
+        messages: [{ role: 'user', content: buildExtractionMessage(jobDescription) }],
+        temperature: 0.1, maxTokens: 768,
+        system: EXTRACTION_SYSTEM_PROMPT,
+      })) { extText += chunk }
+      jdKeywords = parseExtraction(extText)
+      setKeywords(jdKeywords)
+    } catch {
+      // extraction unavailable — recency fallback below still works
+    }
+
+    // ── Phase 2: deterministic hybrid scoring on the server ──────────────────
+    // BM25 + embeddings, RRF-fused per requirement (docs/retrieval-research.md)
+    if (jdKeywords && (jobs.length > 0 || projects.length > 0)) {
+      setPhase('scoring')
       try {
-        const selMsg = buildSelectionMessage({ jobs, education, projects, skills }, jobDescription)
+        const requirements: RequirementInput[] = [
+          ...jdKeywords.mustHave.map(text => ({ text, required: true })),
+          ...jdKeywords.niceToHave.map(text => ({ text, required: false })),
+        ]
+        const res = await fetch('/api/retrieve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requirements }),
+        })
+        if (res.ok) {
+          retrievalResult = await res.json() as RetrievalResult
+          setRetrieval(retrievalResult)
+          orderedJobs     = retrievalResult.rankedJobs.map(r => jobs.find(j => j.id === r.id)!).filter(Boolean)
+          orderedProjects = retrievalResult.rankedProjects.map(r => projects.find(p => p.id === r.id)!).filter(Boolean)
+        }
+      } catch {
+        // server scoring unavailable — recency fallback stands
+      }
+    }
+
+    // ── Phase 3: LLM listwise confirmation over the scored shortlist ─────────
+    if (retrievalResult && (jobs.length > 0 || projects.length > 0)) {
+      setPhase('shortlisting')
+      try {
         let selText = ''
         for await (const chunk of streamCompletion({
           endpoint: settings.llamaEndpoint, model: settings.modelName,
-          messages: [{ role: 'user', content: selMsg }],
-          temperature: 0.1, maxTokens: 512,
-          system: SELECTION_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: buildShortlistMessage({ jobs, education, projects, skills }, retrievalResult, jdKeywords) }],
+          temperature: 0.1, maxTokens: 256,
+          system: SHORTLIST_SYSTEM_PROMPT,
         })) { selText += chunk }
-
-        const { jobIds, projectIds } = parseSelectionIds(selText, jobs.map(j => j.id), projects.map(p => p.id))
-        // Preserve model's relevance ordering (most relevant first) for trimToPageFit
+        const { jobIds, projectIds } = parseShortlist(
+          selText,
+          retrievalResult.rankedJobs.map(r => r.id),
+          retrievalResult.rankedProjects.map(r => r.id),
+        )
         orderedJobs     = jobIds.map(id => jobs.find(j => j.id === id)!).filter(Boolean)
         orderedProjects = projectIds.map(id => projects.find(p => p.id === id)!).filter(Boolean)
       } catch {
-        // Fallback already set to recency order above
+        // confirmation unavailable — the engine's ranking stands
       }
     }
 
@@ -163,16 +219,24 @@ export default function Generate() {
       orderedProjects.map(p => p.id),
       education.length,
       skillCatCount,
+      hasSummary,
     )
     const selectedJobs     = orderedJobs.filter(j => fitJobIds.includes(j.id))
     const selectedProjects = orderedProjects.filter(p => fitProjectIds.includes(p.id))
 
     // ── Phase 2: generate resume with selected entries ────────────────────────
+    // Header and education are deterministic profile data — composed here,
+    // never generated. The model streams in after them; assembleResume puts
+    // the summary and sections in final order.
     setPhase('generating')
     setStreaming(true)
+    const header = buildHeaderLines(profile)
+    const eduLines = buildEducationLines(education)
+    const staticPrefix = [header, eduLines].filter(Boolean).map(s => s + '\n').join('')
+    setOutput(staticPrefix)
     try {
       const selectedData = { jobs: selectedJobs, education, projects: selectedProjects, skills }
-      const userMessage = buildUserMessage(selectedData, profile, jobDescription)
+      const userMessage = buildUserMessage(selectedData, profile, jobDescription, jdKeywords, retrievalResult)
       const gen = streamCompletion({
         endpoint: settings.llamaEndpoint, model: settings.modelName,
         messages: [{ role: 'user', content: userMessage }],
@@ -184,7 +248,10 @@ export default function Generate() {
       setError(e instanceof Error ? e.message : 'Failed to connect to model server.')
       setConnected(false)
     } finally {
-      setOutput(prev => stripCitations(enforceChronologicalOrder(prev)))
+      setOutput(prev => {
+        const body = prev.startsWith(staticPrefix) ? prev.slice(staticPrefix.length) : prev
+        return assembleResume(header, eduLines, body)
+      })
       setLoading(false)
       setStreaming(false)
       setPhase('idle')
@@ -196,7 +263,10 @@ export default function Generate() {
     if (!jobDescription.trim()) { setError('Job description required to refine.'); return }
     setError(''); setJustSaved(false); setLoading(true); setStreaming(true)
     const snapshot = output
-    setOutput('')
+    const header = buildHeaderLines(profile)
+    const eduLines = buildEducationLines(education)
+    const staticPrefix = [header, eduLines].filter(Boolean).map(s => s + '\n').join('')
+    setOutput(staticPrefix)
     try {
       const userMessage = buildRefineMessage(
         { jobs, education, projects, skills },
@@ -204,6 +274,8 @@ export default function Generate() {
         jobDescription,
         snapshot,
         refineInstructions,
+        keywords,
+        retrieval,
       )
       const gen = streamCompletion({
         endpoint: settings.llamaEndpoint, model: settings.modelName,
@@ -217,7 +289,11 @@ export default function Generate() {
       setError(e instanceof Error ? e.message : 'Failed to connect to model server.')
       setConnected(false)
     } finally {
-      setOutput(prev => stripCitations(enforceChronologicalOrder(prev)))
+      setOutput(prev => {
+        if (prev === snapshot) return prev // errored — snapshot restored above, leave it untouched
+        const body = prev.startsWith(staticPrefix) ? prev.slice(staticPrefix.length) : prev
+        return assembleResume(header, eduLines, body)
+      })
       setLoading(false)
       setStreaming(false)
     }
@@ -327,16 +403,21 @@ export default function Generate() {
             <Button onClick={generate} disabled={loading || !jobDescription.trim() || connected !== true}>
               <Sparkles size={14} className={loading ? 'animate-spin' : ''} />
               {loading
-                ? phase === 'selecting' ? 'Selecting…' : 'Generating…'
+                ? phase === 'extracting' ? 'Analyzing…'
+                : phase === 'scoring' ? 'Scoring…'
+                : phase === 'shortlisting' ? 'Selecting…'
+                : 'Generating…'
                 : 'Generate Resume'}
               {!loading && <ChevronRight size={13} />}
             </Button>
             {profileEmpty && <p className="text-xs text-amber-400">Add your experience first.</p>}
             {error && <p className="text-xs text-red-400">{error}</p>}
-            {loading && phase === 'selecting' && (
+            {loading && phase !== 'generating' && phase !== 'idle' && (
               <p className="text-xs text-zinc-500 flex items-center gap-1.5">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                Selecting relevant experience…
+                {phase === 'extracting' ? 'Reading job requirements…'
+                  : phase === 'scoring' ? 'Scoring your experience against the posting…'
+                  : 'Choosing the strongest entries…'}
               </p>
             )}
           </div>
@@ -374,6 +455,55 @@ export default function Generate() {
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-orange-400 animate-pulse" />
                   Generating…
                 </p>
+              )}
+              {coverage && coverage.items.length > 0 && (
+                <div className="mt-3">
+                  <div className="flex items-baseline gap-2 mb-1.5">
+                    <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Keyword Coverage</p>
+                    {coverage.mustHavePct !== null && (
+                      <span className={`text-xs font-medium ${
+                        coverage.mustHavePct >= 75 ? 'text-emerald-400' :
+                        coverage.mustHavePct >= 50 ? 'text-amber-400' : 'text-red-400'
+                      }`}>
+                        {coverage.mustHaveCovered}/{coverage.mustHaveTotal} must-haves ({coverage.mustHavePct}%)
+                      </span>
+                    )}
+                    {retrieval && !retrieval.embeddingsUsed && (
+                      <span className="text-xs text-zinc-600">keyword matching only — semantic model still loading</span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {coverage.items.map(item => {
+                      const full = item.inSkills && item.inBullets
+                      const partial = !full && (item.inSkills || item.inBullets)
+                      const evidence = retrieval?.requirements.find(
+                        r => r.text.toLowerCase() === item.keyword.toLowerCase())
+                      const style = full    ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5'
+                                  : partial ? 'text-amber-400 border-amber-500/30 bg-amber-500/5'
+                                  : item.required ? 'text-zinc-500 border-zinc-700 bg-zinc-900 line-through'
+                                  : 'text-zinc-600 border-zinc-800 bg-zinc-900/50 line-through'
+                      const where = full ? 'In skills + evidence bullet'
+                                  : item.inSkills ? 'In skills only — no evidence bullet'
+                                  : item.inBullets ? 'In a bullet — not in skills'
+                                  : evidence?.covered === false
+                                    ? 'No supporting experience found in your profile — add real experience there'
+                                  : evidence?.covered
+                                    ? 'Your profile has evidence for this but it did not make the resume — try Refine'
+                                  : 'Not covered — your profile may lack support for this'
+                      return (
+                        <span key={item.keyword}
+                          title={`${where}${item.required ? '' : ' (nice-to-have)'}`}
+                          className={`px-2 py-0.5 rounded-full text-xs border cursor-default ${style}`}>
+                          {item.keyword}
+                        </span>
+                      )
+                    })}
+                  </div>
+                  <p className="text-xs text-zinc-700 mt-1.5">
+                    ~75–80% of must-haves is the sweet spot. Missing keywords usually mean the profile lacks
+                    support — add real experience in the profile sections rather than forcing them in.
+                  </p>
+                </div>
               )}
               {!streaming && (
                 <div className="mt-4 pt-4 border-t border-zinc-800/60">

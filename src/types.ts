@@ -2,6 +2,7 @@ export interface Job {
   id: string
   company: string
   title: string
+  displayTitle: string  // market-standard alias, rendered as "Display Title (Internal Title)"
   location: string
   startDate: string
   endDate: string
@@ -98,4 +99,44 @@ export interface AppSettings {
   modelName: string
   temperature: number
   maxTokens: number
+}
+
+// ─── Retrieval (see docs/retrieval-research.md §5) ───────────────────────────
+// Shared between server/retrieval.ts and the Generate flow.
+
+export interface RequirementInput {
+  text: string
+  required: boolean
+}
+
+export interface EvidenceHit {
+  chunkId: string
+  parentKind: 'job' | 'project' | 'skill'
+  parentId: string
+  rawText: string     // the bare bullet/skill text (no context template)
+  score: number       // fused RRF score
+  cosine: number | null
+}
+
+export interface RequirementEvidence {
+  text: string
+  required: boolean
+  covered: boolean    // confidence-gated: below threshold ⇒ gap, never force-fit
+  topEvidence: EvidenceHit[]
+}
+
+export interface RankedEntry {
+  id: string
+  score: number       // normalized 0–1 within its list
+  matched: string[]   // requirement texts this entry evidences
+}
+
+export interface RetrievalResult {
+  requirements: RequirementEvidence[]
+  rankedJobs: RankedEntry[]
+  rankedProjects: RankedEntry[]
+  // per parent entry: its bullet raw texts ranked by JD relevance (best first)
+  bulletRanks: Record<string, string[]>
+  embeddingsUsed: boolean
+  indexedChunks: number
 }

@@ -9,12 +9,14 @@
     "dev:server": "PORT=3001 tsx watch server/index.ts",
     "build": "vite build",
     "typecheck": "tsc --noEmit && tsc --noEmit --project tsconfig.server.json",
+    "check:pdf-text": "tsx scripts/check-pdf-text.ts",
     "db:push": "drizzle-kit push",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
+    "@huggingface/transformers": "^4.2.0",
     "@mozilla/readability": "^0.6.0",
     "@nivo/core": "^0.99.0",
     "@nivo/sankey": "^0.99.0",

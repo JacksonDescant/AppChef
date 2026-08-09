@@ -38,7 +38,7 @@ export type ResumeEntry =
   | { kind: 'skill'; category: string; items: string }
 
 export interface ResumeSection { title: string; entries: ResumeEntry[] }
-export interface ResumeIR { name: string; contact: string; sections: ResumeSection[] }
+export interface ResumeIR { name: string; contact: string; summary: string; sections: ResumeSection[] }
 
 function splitCols(s: string): [string, string] {
   // The LLM is asked for a literal tab but sometimes emits the two characters
@@ -52,7 +52,7 @@ function splitCols(s: string): [string, string] {
 // [BULLET] attaches to the most recent entry; [EDU_DEG]/[JOB_ROLE] pair with a
 // pending [EDU_INST]/[JOB_CO] but tolerate a missing partner line.
 export function parseTagged(text: string): ResumeIR {
-  const ir: ResumeIR = { name: '', contact: '', sections: [] }
+  const ir: ResumeIR = { name: '', contact: '', summary: '', sections: [] }
 
   function section(): ResumeSection {
     if (ir.sections.length === 0) ir.sections.push({ title: '', entries: [] })
@@ -68,6 +68,10 @@ export function parseTagged(text: string): ResumeIR {
       ir.name = raw.slice(6).trim()
     } else if (raw.startsWith('[CONTACT]')) {
       ir.contact = raw.slice(9).trim()
+    } else if (raw.startsWith('[SUMMARY]')) {
+      // Tolerate the model splitting the summary across several tagged lines.
+      const part = raw.slice(9).trim()
+      ir.summary = ir.summary ? `${ir.summary} ${part}` : part
     } else if (raw.startsWith('[SECTION]')) {
       ir.sections.push({ title: raw.slice(9).trim(), entries: [] })
     } else if (raw.startsWith('[EDU_INST]')) {
@@ -141,6 +145,25 @@ function preamble(k: SqueezeKnobs): string {
   return `\\documentclass[letterpaper,${k.fontSize}pt]{article}
 
 \\usepackage{latexsym}
+% ATS text extraction: upstream Jake's Resume relies on \\input{glyphtounicode}
+% + \\pdfgentounicode=1 for a machine-readable text layer, but those are pdfTeX
+% primitives that fail under XeTeX (tectonic). The XeTeX equivalent: load the
+% OpenType Latin Modern fonts (by filename — tectonic's bundle has no system
+% font names) with common ligatures disabled, so "ffi"/"fl" stay separate
+% letters and words like "efficient" extract as plain ASCII instead of
+% U+FB00-style ligature codepoints that break ATS keyword search.
+% Ligatures=TeX keeps the -- and --- dash shorthands emitted by escapeLatex.
+% BoldFeatures maps bold small caps (the [NAME] line) to plain bold, matching
+% the legacy Computer Modern substitution this template rendered with before.
+\\usepackage{fontspec}
+\\setmainfont{lmroman10-regular.otf}[
+  BoldFont = lmroman10-bold.otf,
+  ItalicFont = lmroman10-italic.otf,
+  BoldItalicFont = lmroman10-bolditalic.otf,
+  SmallCapsFont = lmromancaps10-regular.otf,
+  BoldFeatures = {SmallCapsFont = lmroman10-bold.otf},
+  Ligatures = {TeX, NoCommon},
+]
 \\usepackage[empty]{fullpage}
 \\usepackage{titlesec}
 \\usepackage[usenames,dvipsnames]{color}
@@ -148,8 +171,6 @@ function preamble(k: SqueezeKnobs): string {
 \\usepackage[hidelinks]{hyperref}
 \\usepackage{fancyhdr}
 \\usepackage{tabularx}
-% Upstream Jake's Resume also uses \\input{glyphtounicode} + \\pdfgentounicode=1,
-% omitted here: they are pdfTeX primitives and fail under XeTeX (tectonic).
 
 \\pagestyle{fancy}
 \\fancyhf{}
@@ -211,8 +232,20 @@ function bulletList(bullets: string[]): string {
   ].join('\n')
 }
 
+// Jake's project heading: bold name, then an italic tech list after " | ".
+function projectHeading(nameL: string): string {
+  const sep = nameL.indexOf(' | ')
+  if (sep === -1) return `\\textbf{${escapeLatex(nameL)}}`
+  const name = nameL.slice(0, sep).trim()
+  const tech = nameL.slice(sep + 3).trim()
+  if (!tech) return `\\textbf{${escapeLatex(name)}}`
+  return `\\textbf{${escapeLatex(name)}} $|$ \\emph{${escapeLatex(tech)}}`
+}
+
 function renderEntry(e: ResumeEntry): string {
   switch (e.kind) {
+    // Upstream Jake's Resume row order: education = Institution|Location over
+    // Degree|Dates; jobs = Title|Dates (bold) over Company|Location (italic).
     case 'edu':
       return [
         `    \\resumeSubheading{${escapeLatex(e.instL)}}{${escapeLatex(e.instR)}}{${escapeLatex(e.degL)}}{${escapeLatex(e.degR)}}`,
@@ -220,12 +253,12 @@ function renderEntry(e: ResumeEntry): string {
       ].filter(Boolean).join('\n')
     case 'job':
       return [
-        `    \\resumeSubheading{${escapeLatex(e.coL)}}{${escapeLatex(e.coR)}}{${escapeLatex(e.roleL)}}{${escapeLatex(e.roleR)}}`,
+        `    \\resumeSubheading{${escapeLatex(e.roleL)}}{${escapeLatex(e.roleR)}}{${escapeLatex(e.coL)}}{${escapeLatex(e.coR)}}`,
         bulletList(e.bullets),
       ].filter(Boolean).join('\n')
     case 'project':
       return [
-        `    \\resumeProjectHeading{\\textbf{${escapeLatex(e.nameL)}}}{${escapeLatex(e.nameR)}}`,
+        `    \\resumeProjectHeading{${projectHeading(e.nameL)}}{${escapeLatex(e.nameR)}}`,
         bulletList(e.bullets),
       ].filter(Boolean).join('\n')
     case 'skill':
@@ -261,14 +294,64 @@ function renderSection(s: ResumeSection): string {
   return parts.join('\n')
 }
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const URL_RE = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+(\/\S*)?$/i
+
+// hyperref URL argument: % and # are the characters that break it in practice.
+function escapeUrl(u: string): string {
+  return u.replace(/%/g, '\\%').replace(/#/g, '\\#')
+}
+
+// URL contact parts render as labeled hyperlinks ("GitHub", "Portfolio") —
+// never as pasted plain-text URLs. Deliberate tradeoff recorded in
+// docs/ats-research.md §5: parsers that index only visible text won't see the
+// URL target. Email stays visible (recruiters copy it); location/phone are
+// plain text.
+const LINK_LABELS: Record<string, string> = {
+  'github.com': 'GitHub',
+  'gitlab.com': 'GitLab',
+  'linkedin.com': 'LinkedIn',
+  'stackoverflow.com': 'Stack Overflow',
+}
+
+function linkLabel(part: string): string {
+  const host = part.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0].toLowerCase()
+  for (const [key, label] of Object.entries(LINK_LABELS)) {
+    if (host === key || host.endsWith(`.${key}`)) return label
+  }
+  return 'Portfolio'
+}
+
+function renderContact(contact: string): string {
+  return contact.split('|').map(p => p.trim()).filter(Boolean).map(part => {
+    if (/[{}\\]/.test(part)) return escapeLatex(part)
+    if (EMAIL_RE.test(part)) return `\\href{mailto:${escapeUrl(part)}}{${escapeLatex(part)}}`
+    if (URL_RE.test(part)) {
+      const target = /^https?:\/\//i.test(part) ? part : `https://${part}`
+      return `\\href{${escapeUrl(target)}}{${escapeLatex(linkLabel(part))}}`
+    }
+    return escapeLatex(part)
+  }).join(' \\textbar{} ')
+}
+
+function renderSummary(summary: string): string {
+  if (!summary) return ''
+  return [
+    '\\section{SUMMARY}',
+    ' \\begin{itemize}[leftmargin=0.15in, label={}]',
+    `    \\small{\\item{${escapeLatex(summary)}}}`,
+    ' \\end{itemize}',
+  ].join('\n')
+}
+
 export function renderTex(ir: ResumeIR, knobs: SqueezeKnobs): string {
   const body = [
     '\\begin{center}',
     `    \\textbf{\\Huge \\scshape ${escapeLatex(ir.name)}} \\\\ \\vspace{1pt}`,
-    `    \\small ${escapeLatex(ir.contact)}`,
+    `    \\small ${renderContact(ir.contact)}`,
     '\\end{center}',
     '',
-    ir.sections.map(renderSection).filter(Boolean).join('\n\n'),
+    [renderSummary(ir.summary), ...ir.sections.map(renderSection)].filter(Boolean).join('\n\n'),
   ].join('\n')
 
   return `${preamble(knobs)}\n\\begin{document}\n\n${body}\n\n\\end{document}\n`
