@@ -8,6 +8,7 @@ import { db, initDb } from './db/index'
 import { jobs, education, projects, skills, targetJobs, applications, settings, profile, savedResumes } from './db/schema'
 import { eq } from 'drizzle-orm'
 import { indexStatus, reindexChunks, scheduleEmbedding, scheduleReindex } from './chunks'
+import { ensureEmbeddings } from './embeddings'
 import { retrieve } from './retrieval'
 import type { RequirementInput } from '../src/types'
 
@@ -233,6 +234,11 @@ app.listen(PORT, () => {
   try {
     reindexChunks()
     scheduleEmbedding()
+    const status = indexStatus()
+    console.log(`[retrieval] index ready: ${status.chunks} chunk(s), ${status.embedded} embedded`)
+    // Warm the query-side model even when nothing is pending, so the first
+    // generate doesn't pay the load latency
+    if (status.chunks > 0) void ensureEmbeddings()
   } catch (e) {
     console.warn(`[retrieval] index unavailable: ${(e as Error).message}`)
   }

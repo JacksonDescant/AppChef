@@ -121,7 +121,10 @@ export const reindexChunks = rawDb.transaction(() => {
 let embedChain: Promise<void> = Promise.resolve()
 
 export function scheduleEmbedding(): void {
+  // The tail .catch keeps a queue failure from becoming an unhandled
+  // rejection, which would take down the whole server process.
   embedChain = embedChain.then(embedPending, embedPending)
+    .catch(e => console.warn(`[retrieval] embed queue error: ${(e as Error).message}`))
 }
 
 async function embedPending(): Promise<void> {

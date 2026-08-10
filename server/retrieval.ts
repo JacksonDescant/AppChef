@@ -9,7 +9,7 @@
 import { db, rawDb } from './db/index'
 import { jobs, projects } from './db/schema'
 import type { EvidenceHit, RankedEntry, RequirementEvidence, RequirementInput, RetrievalResult } from '../src/types'
-import { cosine, embedQuery, embeddingState } from './embeddings'
+import { cosine, embedQuery, embeddingState, ensureEmbeddings } from './embeddings'
 
 const RRF_K = 60          // standard reciprocal-rank-fusion constant
 const COSINE_TAU = 0.55   // confidence gate: below this (and no exact hit) ⇒ gap
@@ -66,6 +66,10 @@ export async function retrieve(requirements: RequirementInput[]): Promise<Retrie
       vectors.set(c.id, new Float32Array(c.embedding.buffer, c.embedding.byteOffset, c.embedding.byteLength / 4))
     }
   }
+  // Stored vectors are useless without the query-side model — make sure it is
+  // loaded (memoized; the boot warm-up usually finished long ago) rather than
+  // silently degrading to keyword-only when the boot had nothing to embed.
+  if (vectors.size > 0) await ensureEmbeddings()
   const embeddingsUsed = vectors.size > 0 && embeddingState() === 'ready'
 
   // fused score per requirement per chunk; also each chunk's best score overall
