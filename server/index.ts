@@ -209,9 +209,11 @@ router.post('/pdf', async (req, res) => {
   }
 
   try {
-    const pdf = await serialized(() => compileOnePageResume(text))
+    const { pdf, fillPct } = await serialized(() => compileOnePageResume(text))
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="${filename}.pdf"`)
+    // Real page fill (0–100) — drives the client's dynamic fill-the-page pass
+    if (fillPct !== null) res.setHeader('X-Appchef-Fill', String(fillPct))
     res.send(pdf)
   } catch (e) {
     const err = e as LatexError

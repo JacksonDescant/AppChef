@@ -131,10 +131,12 @@ export interface SqueezeKnobs {
   listPost: number     // \vspace after a bullet list
 }
 
-// Preset 0 is faithful to upstream Jake's Resume; later presets progressively
-// tighten spacing, then drop to 10pt, for the one-page enforcement loop.
+// Preset 0 is the default look: slight air between bullets (itemSep 2) and
+// breathing room at section boundaries (sectionPre/Post eased) so entries
+// don't crowd the title rules. Later presets progressively tighten spacing,
+// then drop to 10pt, for the one-page enforcement loop — cramped is their job.
 export const SQUEEZE_PRESETS: SqueezeKnobs[] = [
-  { fontSize: 11, sectionPre: -4, sectionPost: -5, itemVspace: -2, subheadPre: -2, subheadPost: -7, itemSep: 0, listPost: -5 },
+  { fontSize: 11, sectionPre: -2, sectionPost: -2, itemVspace: -2, subheadPre: -2, subheadPost: -7, itemSep: 2, listPost: -5 },
   { fontSize: 11, sectionPre: -6, sectionPost: -7, itemVspace: -3, subheadPre: -4, subheadPost: -8, itemSep: -2, listPost: -7 },
   { fontSize: 10, sectionPre: -6, sectionPost: -7, itemVspace: -3, subheadPre: -4, subheadPost: -8, itemSep: -2, listPost: -7 },
 ]
@@ -334,13 +336,15 @@ function renderContact(contact: string): string {
   }).join(' \\textbar{} ')
 }
 
-function renderSummary(summary: string): string {
+function renderSummary(summary: string, k: SqueezeKnobs): string {
   if (!summary) return ''
   return [
     '\\section{SUMMARY}',
     ' \\begin{itemize}[leftmargin=0.15in, label={}]',
     `    \\small{\\item{${escapeLatex(summary)}}}`,
-    ' \\end{itemize}',
+    // Same trailing correction bullet lists get via \resumeItemListEnd — without
+    // it the gap below the summary runs visibly larger than other sections'.
+    ` \\end{itemize}\\vspace{${k.listPost}pt}`,
   ].join('\n')
 }
 
@@ -351,10 +355,15 @@ export function renderTex(ir: ResumeIR, knobs: SqueezeKnobs): string {
     `    \\small ${renderContact(ir.contact)}`,
     '\\end{center}',
     '',
-    [renderSummary(ir.summary), ...ir.sections.map(renderSection)].filter(Boolean).join('\n\n'),
+    [renderSummary(ir.summary, knobs), ...ir.sections.map(renderSection)].filter(Boolean).join('\n\n'),
   ].join('\n')
 
-  return `${preamble(knobs)}\n\\begin{document}\n\n${body}\n\n\\end{document}\n`
+  // Real page fill for the client's dynamic fill-the-page loop: \par\penalty0
+  // forces TeX's page builder to move all recent contributions to the page so
+  // \pagetotal reflects the full content height (without it the last
+  // paragraphs are still uncontributed and the reading is garbage); \space
+  // survives TeX eating the whitespace after \pagetotal.
+  return `${preamble(knobs)}\n\\begin{document}\n\n${body}\n\n\\par\\penalty0\n\\typeout{APPCHEF-FILL: \\the\\pagetotal\\space OF \\the\\textheight}\n\\end{document}\n`
 }
 
 // ─── Content reduction (for the one-page retry loop) ─────────────────────────

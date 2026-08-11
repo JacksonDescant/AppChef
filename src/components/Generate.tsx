@@ -7,10 +7,10 @@ import { useSection } from '../hooks/useSection'
 import { useSettings } from '../hooks/useSettings'
 import { streamCompletion, checkConnection } from '../llm'
 import {
-  SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, SHORTLIST_SYSTEM_PROMPT,
+  SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, SHORTLIST_SYSTEM_PROMPT,
   buildUserMessage, buildRefineMessage, buildExtractionMessage, buildShortlistMessage,
   parseExtraction, parseShortlist,
-  assembleResume, buildEducationLines, buildHeaderLines, trimToPageFit,
+  assembleResume, buildEducationLines, buildHeaderLines, expandToPageFit, pageFillCount, trimToPageFit,
 } from '../prompts'
 import type { JdKeywords } from '../prompts'
 import { computeCoverage } from '../lib/coverage'
@@ -53,7 +53,7 @@ export default function Generate() {
   const [justSaved, setJustSaved] = useState(false)
   const [connected, setConnected] = useState<boolean | null>(null)
   const [refineInstructions, setRefineInstructions] = useState('')
-  const [phase, setPhase] = useState<'idle' | 'extracting' | 'scoring' | 'shortlisting' | 'generating'>('idle')
+  const [phase, setPhase] = useState<'idle' | 'extracting' | 'scoring' | 'shortlisting' | 'generating' | 'filling'>('idle')
   const [keywords, setKeywords] = useState<JdKeywords | null>(null)
   const [retrieval, setRetrieval] = useState<RetrievalResult | null>(null)
 
@@ -206,8 +206,16 @@ export default function Generate() {
           retrievalResult.rankedJobs.map(r => r.id),
           retrievalResult.rankedProjects.map(r => r.id),
         )
-        orderedJobs     = jobIds.map(id => jobs.find(j => j.id === id)!).filter(Boolean)
-        orderedProjects = projectIds.map(id => projects.find(p => p.id === id)!).filter(Boolean)
+        // Bullets are capped (rule 15), so a sparse selection cannot fill the
+        // page vertically — re-add next-ranked entries until it can.
+        const expanded = expandToPageFit(
+          jobIds, projectIds,
+          retrievalResult.rankedJobs.map(r => r.id),
+          retrievalResult.rankedProjects.map(r => r.id),
+          education.length, skillCatCount, hasSummary,
+        )
+        orderedJobs     = expanded.jobIds.map(id => jobs.find(j => j.id === id)!).filter(Boolean)
+        orderedProjects = expanded.projectIds.map(id => projects.find(p => p.id === id)!).filter(Boolean)
       } catch {
         // confirmation unavailable — the engine's ranking stands
       }
@@ -224,34 +232,85 @@ export default function Generate() {
     const selectedJobs     = orderedJobs.filter(j => fitJobIds.includes(j.id))
     const selectedProjects = orderedProjects.filter(p => fitProjectIds.includes(p.id))
 
-    // ── Phase 2: generate resume with selected entries ────────────────────────
+    // ── Phase 4: generate, then dynamically fill real page space ─────────────
     // Header and education are deterministic profile data — composed here,
     // never generated. The model streams in after them; assembleResume puts
     // the summary and sections in final order.
-    setPhase('generating')
     setStreaming(true)
     const header = buildHeaderLines(profile)
     const eduLines = buildEducationLines(education)
     const staticPrefix = [header, eduLines].filter(Boolean).map(s => s + '\n').join('')
-    setOutput(staticPrefix)
+
+    const runGeneration = async (selJobs: Job[], selProjects: Project[], bulletBonus: number): Promise<string> => {
+      setOutput(staticPrefix)
+      let raw = staticPrefix
+      let final = ''
+      const userMessage = buildUserMessage(
+        { jobs: selJobs, education, projects: selProjects, skills },
+        profile, jobDescription, jdKeywords, retrievalResult, bulletBonus,
+      )
+      try {
+        const gen = streamCompletion({
+          endpoint: settings.llamaEndpoint, model: settings.modelName,
+          messages: [{ role: 'user', content: userMessage }],
+          temperature: settings.temperature, maxTokens: settings.maxTokens,
+          system: SYSTEM_PROMPT,
+        })
+        for await (const chunk of gen) {
+          raw += chunk
+          setOutput(prev => prev + chunk)
+        }
+      } finally {
+        final = assembleResume(header, eduLines, raw.slice(staticPrefix.length))
+        setOutput(final)
+      }
+      return final
+    }
+
+    // One entry from the ranked pool, mirroring expandToPageFit's preference
+    const growSelection = (selJ: Job[], selP: Project[]): { jobs: Job[], projects: Project[] } => {
+      if (!retrievalResult) return { jobs: selJ, projects: selP }
+      const jPool = retrievalResult.rankedJobs.map(r => jobs.find(j => j.id === r.id)!)
+        .filter(Boolean).filter(j => !selJ.some(s => s.id === j.id))
+      const pPool = retrievalResult.rankedProjects.map(r => projects.find(p => p.id === r.id)!)
+        .filter(Boolean).filter(p => !selP.some(s => s.id === p.id))
+      if (pPool.length > 0 && (selP.length < 2 || jPool.length === 0)) {
+        return { jobs: selJ, projects: [...selP, pPool[0]] }
+      }
+      if (jPool.length > 0) return { jobs: [...selJ, jPool[0]], projects: selP }
+      return { jobs: selJ, projects: selP }
+    }
+
     try {
-      const selectedData = { jobs: selectedJobs, education, projects: selectedProjects, skills }
-      const userMessage = buildUserMessage(selectedData, profile, jobDescription, jdKeywords, retrievalResult)
-      const gen = streamCompletion({
-        endpoint: settings.llamaEndpoint, model: settings.modelName,
-        messages: [{ role: 'user', content: userMessage }],
-        temperature: settings.temperature, maxTokens: settings.maxTokens,
-        system: SYSTEM_PROMPT,
-      })
-      for await (const chunk of gen) setOutput(prev => prev + chunk)
+      setPhase('generating')
+      let selJobs = selectedJobs
+      let selProjects = selectedProjects
+      const text = await runGeneration(selJobs, selProjects, 0)
+
+      // ── Dynamic fill: measure the REAL compiled page, not the estimate. ────
+      // If meaningfully short and more ranked content exists (or caps aren't
+      // binding), add the next entry and regenerate once with the measured
+      // shortfall folded into the bullet target.
+      if (text && retrievalResult) {
+        const fill = await fetchPageFill(text)
+        if (fill !== null && fill < 90) {
+          // usable page ≈ 45 bullet-heights; convert missing % into bullets
+          const deficitBullets = Math.ceil(((97 - fill) / 100) * 45)
+          const grown = growSelection(selJobs, selProjects)
+          const before = pageFillCount({ jobs: selJobs, education, projects: selProjects, skills }, hasSummary)
+          const after = pageFillCount({ jobs: grown.jobs, education, projects: grown.projects, skills }, hasSummary, deficitBullets)
+          if (after > before) {
+            setPhase('filling')
+            selJobs = grown.jobs
+            selProjects = grown.projects
+            await runGeneration(selJobs, selProjects, deficitBullets)
+          }
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to connect to model server.')
       setConnected(false)
     } finally {
-      setOutput(prev => {
-        const body = prev.startsWith(staticPrefix) ? prev.slice(staticPrefix.length) : prev
-        return assembleResume(header, eduLines, body)
-      })
       setLoading(false)
       setStreaming(false)
       setPhase('idle')
@@ -280,8 +339,10 @@ export default function Generate() {
       const gen = streamCompletion({
         endpoint: settings.llamaEndpoint, model: settings.modelName,
         messages: [{ role: 'user', content: userMessage }],
-        temperature: settings.temperature, maxTokens: settings.maxTokens,
-        system: SYSTEM_PROMPT,
+        // Refine must reproduce untouched lines verbatim — cap the sampling
+        // temperature so copying fidelity doesn't degrade at creative settings
+        temperature: Math.min(settings.temperature, 0.3), maxTokens: settings.maxTokens,
+        system: REFINE_SYSTEM_PROMPT,
       })
       for await (const chunk of gen) setOutput(prev => prev + chunk)
     } catch (e) {
@@ -302,6 +363,24 @@ export default function Generate() {
   async function copy() {
     await navigator.clipboard.writeText(output)
     setCopied(true); setTimeout(() => setCopied(false), 2000)
+  }
+
+  // Compiles via /api/pdf and reads the real page-fill header; the compile is
+  // cached server-side, so the preview's request for the same text is free.
+  async function fetchPageFill(content: string): Promise<number | null> {
+    try {
+      const res = await fetch('/api/pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: content }),
+      })
+      if (!res.ok) return null
+      await res.blob()
+      const fill = res.headers.get('X-Appchef-Fill')
+      return fill ? parseInt(fill, 10) : null
+    } catch {
+      return null
+    }
   }
 
   async function getPdfBlob(content: string): Promise<Blob> {
@@ -406,6 +485,7 @@ export default function Generate() {
                 ? phase === 'extracting' ? 'Analyzing…'
                 : phase === 'scoring' ? 'Scoring…'
                 : phase === 'shortlisting' ? 'Selecting…'
+                : phase === 'filling' ? 'Filling…'
                 : 'Generating…'
                 : 'Generate Resume'}
               {!loading && <ChevronRight size={13} />}
@@ -417,6 +497,7 @@ export default function Generate() {
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
                 {phase === 'extracting' ? 'Reading job requirements…'
                   : phase === 'scoring' ? 'Scoring your experience against the posting…'
+                  : phase === 'filling' ? 'Page has room — adding more of your experience…'
                   : 'Choosing the strongest entries…'}
               </p>
             )}

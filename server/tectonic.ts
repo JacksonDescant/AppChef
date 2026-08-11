@@ -44,7 +44,7 @@ function tail(s: string, lines = 30): string {
   return s.split('\n').slice(-lines).join('\n')
 }
 
-async function compileTex(tex: string): Promise<{ pdf: Buffer; pages: number }> {
+async function compileTex(tex: string): Promise<{ pdf: Buffer; pages: number; fillPct: number | null }> {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'appchef-tex-'))
   try {
     const texPath = path.join(dir, 'resume.tex')
@@ -72,7 +72,13 @@ async function compileTex(tex: string): Promise<{ pdf: Buffer; pages: number }> 
       : (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) ?? []).length
     if (!pages) throw new LatexError('Could not determine page count', tail(log))
 
-    return { pdf, pages }
+    // Real page fill logged by renderTex — only meaningful for 1-page output
+    const fill = log.match(/APPCHEF-FILL: ([\d.]+)pt\s*OF ([\d.]+)pt/)
+    const fillPct = fill && pages === 1
+      ? Math.min(100, Math.round((parseFloat(fill[1]) / parseFloat(fill[2])) * 100))
+      : null
+
+    return { pdf, pages, fillPct }
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -82,9 +88,11 @@ async function compileTex(tex: string): Promise<{ pdf: Buffer; pages: number }> 
 // Phase A: progressively tighter spacing presets.
 // Phase B: at max squeeze, drop least-important content and recompile.
 
-const cache = new Map<string, Buffer>() // sha256(taggedText) → pdf, LRU, cap 10
+export interface CompiledResume { pdf: Buffer; fillPct: number | null }
 
-export async function compileOnePageResume(taggedText: string): Promise<Buffer> {
+const cache = new Map<string, CompiledResume>() // sha256(taggedText) → result, LRU, cap 10
+
+export async function compileOnePageResume(taggedText: string): Promise<CompiledResume> {
   const key = createHash('sha256').update(taggedText).digest('hex')
   const hit = cache.get(key)
   if (hit) {
@@ -95,25 +103,25 @@ export async function compileOnePageResume(taggedText: string): Promise<Buffer> 
 
   const ir = parseTagged(taggedText)
 
-  const done = (pdf: Buffer): Buffer => {
-    cache.set(key, pdf)
+  const done = (result: CompiledResume): CompiledResume => {
+    cache.set(key, result)
     if (cache.size > 10) cache.delete(cache.keys().next().value!)
-    return pdf
+    return result
   }
 
   for (let i = 0; i < SQUEEZE_PRESETS.length; i++) {
-    const { pdf, pages } = await compileTex(renderTex(ir, SQUEEZE_PRESETS[i]))
-    if (pages === 1) return done(pdf)
+    const { pdf, pages, fillPct } = await compileTex(renderTex(ir, SQUEEZE_PRESETS[i]))
+    if (pages === 1) return done({ pdf, fillPct })
     console.log(`[pdf] squeeze preset ${i} → ${pages} pages, tightening`)
   }
 
   const maxSqueeze = SQUEEZE_PRESETS[SQUEEZE_PRESETS.length - 1]
   for (let i = 0; i < MAX_DROPS; i++) {
     if (!dropOne(ir)) break
-    const { pdf, pages } = await compileTex(renderTex(ir, maxSqueeze))
+    const { pdf, pages, fillPct } = await compileTex(renderTex(ir, maxSqueeze))
     if (pages === 1) {
       console.log(`[pdf] fit on one page after dropping ${i + 1} item(s)`)
-      return done(pdf)
+      return done({ pdf, fillPct })
     }
   }
 

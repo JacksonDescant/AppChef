@@ -80,7 +80,7 @@ function scanToUnicode(pdf: Buffer): ScanResult {
 
 async function main(): Promise<void> {
   const pdfArg = process.argv[2]
-  const pdf = pdfArg ? await readFile(pdfArg) : await compileOnePageResume(SAMPLE)
+  const pdf = pdfArg ? await readFile(pdfArg) : (await compileOnePageResume(SAMPLE)).pdf
   const label = pdfArg ?? 'sample resume'
 
   const { ligatureCodeUnits, toUnicodeStreams } = scanToUnicode(pdf)

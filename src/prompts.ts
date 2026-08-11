@@ -52,6 +52,28 @@ RULES:
 15. BULLET CAP: No entry may have more than 3 bullets. AT MOST ONE entry in the entire resume may have 4 — and only when that entry is extremely relevant to the target role. The cap overrides the page-fill count.
 16. PROJECTS PRESENCE: If PROJECTS entries are provided in the profile data, the PROJECTS section must appear with at least one project — two when space allows. Never drop the section entirely; drop an older job's bullet count or an older job before dropping the last project.`
 
+// Refine is an EDIT pass, not a second generation: the draft already went
+// through extraction → retrieval → shortlist → page fill, so its entry set and
+// bullet counts are load-bearing. This prompt's job is surgical change plus
+// verbatim preservation of everything else.
+export const REFINE_SYSTEM_PROMPT = `You are a precise resume editor. You receive an existing one-page resume in a tagged line format and ONE refinement request. Apply the request with the smallest possible change and output the complete updated resume in the same tagged format. Output nothing else — no preamble, no explanation, no markdown fences.
+
+EDIT CONTRACT — this overrides everything except factual accuracy:
+1. Change ONLY what the request requires. Reproduce every other line EXACTLY as it appears in the current resume — same wording, same entries, same order, same bullet counts.
+2. Do not re-tailor, rephrase, reorder, add, or remove anything the request does not ask for. If the request targets one bullet, every other bullet stays untouched.
+3. The current resume already fills exactly one page. Keep the total number of [BULLET] lines the same unless the request itself adds or removes content. If the request removes an entry, redistribute roughly that many bullets across the remaining entries (within the caps below); if it adds an entry, trim the least job-relevant bullets elsewhere to make room.
+
+FORMAT (identical to the current resume): [SUMMARY], [SECTION], [JOB_CO]Company\\tCity, [JOB_ROLE]Title\\tDates, [PROJECT]Name | Tech\\tDates, [BULLET]text, [SKILL]Category: items. The \\t is a literal tab character. NEVER output [NAME], [CONTACT], [EDU_INST], [EDU_DEG], or an EDUCATION section — the header and education are added automatically.
+
+RULES FOR LINES YOU CHANGE OR ADD (lines copied unchanged are exempt):
+1. GROUNDING: every new or rewritten [BULLET] must end with a citation tag — [S1], or [S1,S3] when synthesizing — pointing at the numbered source bullets in the candidate profile ([Sdesc] for an entry's Description field). Never introduce numbers, metrics, team sizes, dates, or outcomes that are not in the cited source. Bullets copied verbatim from the current resume carry no citation.
+2. Never fabricate or exaggerate; copy dates and job titles exactly as the profile provides them.
+3. KEYWORDS — coverage, not frequency: no keyword more than twice across the entire resume.
+4. BULLET COUNTS: every entry keeps at least 2 bullets and at most 3; at most ONE entry in the resume may have 4, and only when extremely relevant to the target role.
+5. Reverse-chronological order by end date is mandatory in every section — never reorder entries.
+6. PROJECTS: never remove the last remaining project — the section survives with at least one entry.
+7. Start each bullet with a concrete action verb; never reuse an opening verb twice in the resume. Do not use: spearheaded, leveraged, championed, orchestrated, utilized.`
+
 export interface ResumeData {
   jobs: Job[]
   education: EducationEntry[]
@@ -119,14 +141,14 @@ function resumeTitle(j: Job): string {
 const PDF = {
   pageH: 792, mt: 36, mb: 36,   // usable ≈ 720pt
   header: 58,       // \Huge name + contact line + gap
-  sectionHdr: 26,   // \large small-caps title + titlerule + spacing
+  sectionHdr: 31,   // \large small-caps title + titlerule + eased boundary spacing
   eduEntry: 30,     // \resumeSubheading (two rows)
   eduGap: 4,        // gap between edu entries
   jobHdr: 30,       // \resumeSubheading (two rows)
   jobGap: 4,        // spacing before each job
   projectHdr: 22,   // \resumeProjectHeading (single row)
   skillRow: 17,     // one \small skill line (wrap allowance)
-  bullet: 16,       // one \small bullet at 11pt (wrap allowance)
+  bullet: 18,       // one \small bullet at 11pt + itemSep 2 (wrap allowance)
   summaryText: 40,  // 2–3 wrapped \small summary lines
 }
 
@@ -140,8 +162,11 @@ function bulletBudget(nJobs: number, nEdus: number, nProjects: number, nSkillCat
     nJobs     * PDF.jobHdr    + Math.max(0, nJobs - 1)  * PDF.jobGap +
     nProjects * PDF.projectHdr +
     nSkillCats * PDF.skillRow
-  // 0.80 safety factor accounts for bullets/skill rows that wrap to a second line; +2 corrects observed underbudget
-  return Math.max(4, Math.floor((usable - fixed) / PDF.bullet * 0.80) + 2)
+  // 0.88 wrap allowance for bullets/skill rows that run to a second line; +2
+  // corrects observed underbudget. Biased HIGH deliberately: overshoot is
+  // absorbed by the server's squeeze presets, while undershoot leaves visible
+  // blank page that nothing downstream can fix.
+  return Math.max(4, Math.floor((usable - fixed) / PDF.bullet * 0.88) + 2)
 }
 
 // ─── Stage 1: requirement extraction (JD only — the model never needs the
@@ -207,7 +232,8 @@ export function buildShortlistMessage(
     `2. Always include the most recent work experience unless it is completely unrelated to this role.\n` +
     `3. WEIGHT RECENCY: when two entries are comparably relevant, always prefer the more recent one. A job that ended more than ~2 years ago must uniquely cover a core requirement to earn its place.\n` +
     `4. PROJECTS: always keep the top-ranked project; keep a second when it shows requirement evidence. Beyond that, drop entries marked "no requirement evidence found" unless they are the most recent job.\n` +
-    `5. Keep your output ordered most-relevant first.\n\n` +
+    `5. The resume must fill one page: when only a few entries are strong, keep borderline ones rather than cutting to a sparse selection — the ranking already ordered them.\n` +
+    `6. Keep your output ordered most-relevant first.\n\n` +
     `Return ONLY this JSON:\n` +
     `{"jobIds":["..."],"projectIds":["..."]}`
   )
@@ -276,6 +302,36 @@ export function parseShortlist(
   } catch {
     return { jobIds: rankedJobIds, projectIds: rankedProjectIds }
   }
+}
+
+// Mirror of trimToPageFit: with bullets capped at 3 per entry (rule 15), a
+// small selection cannot fill the page vertically — pages must fill
+// horizontally, with more entries. Re-adds the next-ranked unselected entries
+// until the cap ceiling (3n+1 bullets) can reach the page budget. Prefers
+// jobs, except to satisfy the ideally-2-projects rule first.
+export function expandToPageFit(
+  jobIds: string[],
+  projectIds: string[],
+  rankedJobIds: string[],
+  rankedProjectIds: string[],
+  nEdus: number,
+  nSkillCats: number,
+  hasSummary: boolean,
+): { jobIds: string[], projectIds: string[] } {
+  const jIds = [...jobIds]
+  const pIds = [...projectIds]
+  const jobPool = rankedJobIds.filter(id => !jIds.includes(id))
+  const projPool = rankedProjectIds.filter(id => !pIds.includes(id))
+  while (jobPool.length > 0 || projPool.length > 0) {
+    const budget = bulletBudget(jIds.length, nEdus, pIds.length, nSkillCats, hasSummary)
+    if (3 * (jIds.length + pIds.length) + 1 >= budget) break
+    if (projPool.length > 0 && (pIds.length < 2 || jobPool.length === 0)) {
+      pIds.push(projPool.shift()!)
+    } else {
+      jIds.push(jobPool.shift()!)
+    }
+  }
+  return { jobIds: jIds, projectIds: pIds }
 }
 
 // Drops the least-relevant entries (end of each array, entries ordered
@@ -390,7 +446,10 @@ function buildProfileContext(data: ResumeData, profile: Profile | null): string 
   return sections.join('\n\n')
 }
 
-function pageFillInstruction(data: ResumeData, hasSummary: boolean): string {
+// Bullet count the generation prompt will demand — exported so the dynamic
+// fill loop can tell whether a corrective pass would actually change anything.
+// `bulletBonus` folds in the measured shortfall from a real compile.
+export function pageFillCount(data: ResumeData, hasSummary: boolean, bulletBonus = 0): number {
   const byCategory = groupSkillsByCategory(data.skills)
   const budget = bulletBudget(
     data.jobs.length,
@@ -404,7 +463,11 @@ function pageFillInstruction(data: ResumeData, hasSummary: boolean): string {
   // Rule 15 cap: every entry ≤3 bullets, plus one extra for at most one
   // extremely relevant entry — never ask for more than the caps allow.
   const capped = 3 * n + 1
-  const effective = Math.max(Math.min(budget, capped), minRequired)
+  return Math.max(Math.min(budget + bulletBonus, capped), minRequired)
+}
+
+function pageFillInstruction(data: ResumeData, hasSummary: boolean, bulletBonus = 0): string {
+  const effective = pageFillCount(data, hasSummary, bulletBonus)
   return (
     `PAGE FILL REQUIREMENT: Based on the layout, this resume has space for exactly ${effective} bullet points ` +
     `across all work experience and project entries combined. Write that many [BULLET] lines — ` +
@@ -487,12 +550,12 @@ function numberedSourceMap(data: ResumeData): Map<string, string> {
   let sourceIdx = 1
   for (const j of sortByRecency(data.jobs)) {
     for (const b of (j.bullets ?? '').split('\n').map(l => l.trim()).filter(Boolean)) {
-      map.set(`${j.id} ${b}`, `S${sourceIdx++}`)
+      map.set(`${j.id}\u0000${b}`, `S${sourceIdx++}`)
     }
   }
   for (const p of sortProjectsByRecency(data.projects)) {
     for (const b of (p.bullets ?? '').split('\n').map(l => l.trim()).filter(Boolean)) {
-      map.set(`${p.id} ${b}`, `S${sourceIdx++}`)
+      map.set(`${p.id}\u0000${b}`, `S${sourceIdx++}`)
     }
   }
   return map
@@ -501,14 +564,14 @@ function numberedSourceMap(data: ResumeData): Map<string, string> {
 // Deterministic retrieval verdicts rendered for the generation prompt: which
 // source bullets are the strongest evidence per requirement, and which
 // requirements are gaps that must NOT be papered over (rule 5).
-function evidenceBlock(data: ResumeData, retrieval: RetrievalResult | null): string {
+function evidenceBlock(data: ResumeData, retrieval: RetrievalResult | null, forEdit = false): string {
   if (!retrieval || retrieval.requirements.length === 0) return ''
   const sources = numberedSourceMap(data)
   const lines: string[] = []
   for (const req of retrieval.requirements) {
     const label = req.required ? 'Must-have' : 'Nice-to-have'
     const cites = req.topEvidence
-      .map(e => sources.get(`${e.parentId} ${e.rawText}`))
+      .map(e => sources.get(`${e.parentId}\u0000${e.rawText}`))
       .filter((s): s is string => Boolean(s))
       .slice(0, 2)
     if (!req.covered) {
@@ -521,20 +584,24 @@ function evidenceBlock(data: ResumeData, retrieval: RetrievalResult | null): str
   return (
     'EVIDENCE MAP (deterministic retrieval over the candidate profile):\n' +
     lines.join('\n') +
-    '\nUse these citations when selecting and ordering bullets (rule 8): within each entry, cited evidence bullets come first, and the top cited bullet for the most important requirement leads the most recent role.\n\n'
+    (forEdit
+      ? '\nUse these citations to ground any bullet you rewrite or add. They are NOT a reason to touch bullets the request leaves alone.\n\n'
+      : '\nUse these citations when selecting and ordering bullets (rule 8): within each entry, cited evidence bullets come first, and the top cited bullet for the most important requirement leads the most recent role.\n\n')
   )
 }
 
 // The extracted-keyword block injected into generation/refine prompts.
 // Coverage rules live in SYSTEM_PROMPT rule 5; this supplies the data.
-function keywordsBlock(keywords: JdKeywords | null): string {
+function keywordsBlock(keywords: JdKeywords | null, forEdit = false): string {
   if (!keywords) return ''
   const lines = [
     'PRIORITY KEYWORDS (extracted from this job description):',
     keywords.targetTitle && `Target title: ${keywords.targetTitle}`,
     keywords.mustHave.length > 0 && `Must-have: ${keywords.mustHave.join(', ')}`,
     keywords.niceToHave.length > 0 && `Nice-to-have: ${keywords.niceToHave.join(', ')}`,
-    'Apply rule 5: cover each supported must-have once in TECHNICAL SKILLS and once in an evidence bullet; skip unsupported ones; no keyword more than twice.',
+    forEdit
+      ? 'If your requested change touches keywords, keep coverage-not-frequency: once in TECHNICAL SKILLS plus once in an evidence bullet, never more than twice overall. This list is NOT a reason to change lines the request leaves alone.'
+      : 'Apply rule 5: cover each supported must-have once in TECHNICAL SKILLS and once in an evidence bullet; skip unsupported ones; no keyword more than twice.',
   ].filter(Boolean)
   return lines.join('\n') + '\n\n'
 }
@@ -545,6 +612,7 @@ export function buildUserMessage(
   jobDescription: string,
   keywords: JdKeywords | null = null,
   retrieval: RetrievalResult | null = null,
+  bulletBonus = 0,
 ): string {
   const profileContext = buildProfileContext(data, profile)
   const hasSummary = Boolean(profile?.summary?.trim())
@@ -554,7 +622,7 @@ export function buildUserMessage(
     `---\n\n` +
     keywordsBlock(keywords) +
     evidenceBlock(data, retrieval) +
-    `${pageFillInstruction(data, hasSummary)}\n\n` +
+    `${pageFillInstruction(data, hasSummary, bulletBonus)}\n\n` +
     `Write the tailored resume in the exact tagged format specified.`
   )
 }
@@ -569,19 +637,27 @@ export function buildRefineMessage(
   retrieval: RetrievalResult | null = null,
 ): string {
   const profileContext = buildProfileContext(data, profile)
-  const hasSummary = Boolean(profile?.summary?.trim())
+  // The edit target is the model-owned body only: header and education are
+  // static (assembleResume re-adds them), and showing them would tempt the
+  // model to echo content it must never output. Citations were stripped at
+  // assembly, so unchanged bullets legitimately carry none. The draft's own
+  // bullet count is the page-fill spec — the draft already fills the page, so
+  // preserving its count preserves the layout (buildUserMessage's
+  // pageFillInstruction would be wrong here: it budgets for whatever entry
+  // set it is handed, not for the entries actually on the page).
+  const draft = stripStaticTags(currentResume).trim()
+  const draftBullets = (draft.match(/^\[BULLET\]/gm) ?? []).length
   const refinementNote = instructions.trim()
-    || 'Improve the quality of all bullets — ensure every entry has at least 2 strong, specific bullets tightly aligned with the job description. Strengthen weak bullets with more concrete impact, keeping rule 5 (coverage, not frequency — no keyword more than twice).'
+    || 'Polish the wording of the existing bullets in place: strengthen weak verbs and vague claims into concrete, grounded impact. Keep every entry, every bullet count, and the order exactly as they are.'
   return (
-    `Here is the candidate's full profile:\n\n${profileContext}\n\n` +
+    `Here is the candidate's full profile (source data for citations):\n\n${profileContext}\n\n` +
     `---\n\nTarget job description:\n\n${jobDescription}\n\n` +
-    `---\n\nCurrent resume draft to refine:\n\n${currentResume}\n\n` +
-    `---\n\nRefinement instructions: ${refinementNote}\n\n` +
     `---\n\n` +
-    keywordsBlock(keywords) +
-    evidenceBlock(data, retrieval) +
-    `${pageFillInstruction(data, hasSummary)}\n\n` +
-    `Output the complete revised resume in the exact tagged format. Preserve everything that works well and improve what doesn't.`
+    keywordsBlock(keywords, true) +
+    evidenceBlock(data, retrieval, true) +
+    `CURRENT RESUME — the edit target. Its ${draftBullets} [BULLET] lines fill the page exactly; keep that total unless the request changes what content exists:\n\n${draft}\n\n` +
+    `---\n\nREFINEMENT REQUEST: ${refinementNote}\n\n` +
+    `Output the complete updated resume now. Reproduce every line the request does not affect exactly as it appears above.`
   )
 }
 
