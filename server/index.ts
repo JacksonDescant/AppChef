@@ -4,9 +4,9 @@ import { randomUUID } from 'crypto'
 import { Readability } from '@mozilla/readability'
 import { JSDOM } from 'jsdom'
 import { checkTectonic, compileOnePageResume, serialized, warmUp, LatexError } from './tectonic'
-import { db, initDb } from './db/index'
+import { db, initDb, rawDb } from './db/index'
 import { jobs, education, projects, skills, targetJobs, applications, settings, profile, savedResumes } from './db/schema'
-import { eq } from 'drizzle-orm'
+import { eq, getTableColumns } from 'drizzle-orm'
 import { indexStatus, reindexChunks, scheduleEmbedding, scheduleReindex } from './chunks'
 import { ensureEmbeddings } from './embeddings'
 import { retrieve } from './retrieval'
@@ -14,7 +14,8 @@ import type { RequirementInput } from '../src/types'
 
 const app = express()
 app.use(cors({ origin: ['http://localhost:5173', 'http://localhost:4173'] }))
-app.use(express.json())
+// Default 100kb is too small for backup imports (saved resumes alone exceed it)
+app.use(express.json({ limit: '25mb' }))
 
 initDb()
 
@@ -164,6 +165,105 @@ router.put('/settings', (req, res) => {
   db.update(settings).set(req.body).where(eq(settings.id, 1)).run()
   const updated = db.select().from(settings).where(eq(settings.id, 1)).get()
   res.json(updated)
+})
+
+// ─── Resume data export / import (JSON backup) ──────────────────────────────
+// Scope matches the app's Resume view: profile + the sections below. App
+// state (target jobs, application tracker, saved-resume history) and
+// machine-local settings are deliberately excluded.
+
+const DATA_SECTIONS = [
+  { key: 'jobs',      table: jobs,      required: ['company', 'title'] },
+  { key: 'education', table: education, required: ['institution', 'degree'] },
+  { key: 'projects',  table: projects,  required: ['name'] },
+  { key: 'skills',    table: skills,    required: ['name'] },
+] as const
+
+router.get('/export', (_req, res) => {
+  const dump: Record<string, unknown> = {
+    app: 'appchef',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    profile: db.select().from(profile).where(eq(profile.id, 1)).get() ?? null,
+  }
+  for (const s of DATA_SECTIONS) dump[s.key] = db.select().from(s.table).all()
+  res.setHeader('Content-Disposition',
+    `attachment; filename="appchef-resume-${new Date().toISOString().slice(0, 10)}.json"`)
+  res.json(dump)
+})
+
+router.post('/import', (req, res) => {
+  const body = req.body as Record<string, unknown>
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    res.status(400).json({ error: 'Import must be a JSON object (an AppChef export file).' })
+    return
+  }
+
+  // Sanitize and validate everything BEFORE touching the database: unknown
+  // keys are dropped, ids are ensured, required fields checked — a bad file
+  // is rejected whole, never half-applied. Sections absent from the file
+  // leave the corresponding current data untouched.
+  const sections: { key: string; table: (typeof DATA_SECTIONS)[number]['table']; rows: Record<string, unknown>[] }[] = []
+  for (const s of DATA_SECTIONS) {
+    const raw = body[s.key]
+    if (raw === undefined) continue
+    if (!Array.isArray(raw)) { res.status(400).json({ error: `"${s.key}" must be an array` }); return }
+    const allowed = Object.keys(getTableColumns(s.table))
+    const rows: Record<string, unknown>[] = []
+    for (let i = 0; i < raw.length; i++) {
+      const item = raw[i] as Record<string, unknown>
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        res.status(400).json({ error: `${s.key}[${i}] is not an object` })
+        return
+      }
+      const row: Record<string, unknown> = {}
+      for (const k of allowed) if (item[k] !== undefined) row[k] = item[k]
+      for (const need of s.required) {
+        if (typeof row[need] !== 'string' || !(row[need] as string).trim()) {
+          res.status(400).json({ error: `${s.key}[${i}] is missing required field "${need}"` })
+          return
+        }
+      }
+      if (typeof row.id !== 'string' || !row.id) row.id = randomUUID()
+      if ('current' in row) row.current = Boolean(row.current)
+      rows.push(row)
+    }
+    sections.push({ key: s.key, table: s.table, rows })
+  }
+
+  let profileRow: Record<string, string> | null = null
+  if (body.profile != null) {
+    if (typeof body.profile !== 'object' || Array.isArray(body.profile)) {
+      res.status(400).json({ error: '"profile" must be an object' })
+      return
+    }
+    profileRow = {}
+    for (const k of Object.keys(getTableColumns(profile))) {
+      if (k === 'id') continue
+      const v = (body.profile as Record<string, unknown>)[k]
+      if (typeof v === 'string') profileRow[k] = v
+    }
+  }
+
+  if (sections.length === 0 && !profileRow) {
+    res.status(400).json({ error: 'No recognizable AppChef data in this file.' })
+    return
+  }
+
+  // Replace atomically — any failure rolls the whole import back
+  rawDb.transaction(() => {
+    for (const s of sections) {
+      db.delete(s.table).run()
+      if (s.rows.length > 0) db.insert(s.table).values(s.rows as never).run()
+    }
+    if (profileRow) db.update(profile).set(profileRow).where(eq(profile.id, 1)).run()
+  })()
+
+  scheduleReindex() // jobs/projects/skills feed the retrieval index
+  res.json({
+    imported: Object.fromEntries(sections.map(s => [s.key, s.rows.length])),
+    profile: Boolean(profileRow),
+  })
 })
 
 // ─── Fetch job description from URL ─────────────────────────────────────────
