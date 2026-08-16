@@ -50,17 +50,18 @@ function scanEntries(rawBody: string): {
   let current: ScannedEntry | null = null
   let staticEcho = 0
   let totalBullets = 0
-  let inEducation = false
+  let inStatic = false // EDUCATION / TECHNICAL SKILLS sections are composed, not model-owned
   for (const line of rawBody.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed) continue
     if (trimmed.startsWith('[SECTION]')) {
-      inEducation = trimmed.slice(9).trim().toUpperCase() === 'EDUCATION'
-      if (inEducation) staticEcho++
+      const title = trimmed.slice(9).trim().toUpperCase()
+      inStatic = title === 'EDUCATION' || title === 'TECHNICAL SKILLS' || title === 'SKILLS'
+      if (inStatic) staticEcho++
       current = null
       continue
     }
-    if (inEducation) { staticEcho++; continue }
+    if (inStatic) { staticEcho++; continue }
     if (STATIC_TAGS.some(t => trimmed.startsWith(t))) { staticEcho++; current = null; continue }
     if (trimmed.startsWith('[JOB_CO]')) {
       current = { kind: 'job', name: trimmed.slice(8).split('\t')[0].trim(), bullets: [] }
@@ -78,7 +79,8 @@ function scanEntries(rawBody: string): {
       continue
     }
     if (trimmed.startsWith('[JOB_ROLE]')) continue
-    if (trimmed.startsWith('[SKILL]') || trimmed.startsWith('[SUMMARY]')) { current = null; continue }
+    if (trimmed.startsWith('[SKILL]')) { staticEcho++; current = null; continue } // skills are composed
+    if (trimmed.startsWith('[SUMMARY]')) { current = null; continue }
     untagged.push(trimmed)
   }
   return { entries, untagged, staticEcho, totalBullets }
@@ -261,7 +263,10 @@ export function runLint(input: LintInput): LintReport {
     if (retrieval) {
       const cov = computeCoverage(final, keywords)
       for (const item of cov.items) {
-        if (!item.required || item.inSkills || item.inBullets) continue
+        // Skills rows are composed deterministically, so the model's half of
+        // rule 5 is bullet coverage — a supported must-have must show up in
+        // an evidence bullet regardless of the skills list.
+        if (!item.required || item.inBullets) continue
         // Only keyword-like requirements (short skill terms) are expected to
         // appear literally. Long requirement phrases are measured
         // semantically by /api/score — demanding their exact text would push
@@ -276,7 +281,7 @@ export function runLint(input: LintInput): LintReport {
         const citeTxt = cites.length > 0 ? ` (evidence: [${cites.join('], [')}])` : ''
         issues.push({
           kind: 'missing-covered-keyword', severity: 'hard',
-          message: `Must-have keyword "${item.keyword}" has real supporting evidence in the profile${citeTxt} but appears nowhere in the resume — add it to the matching TECHNICAL SKILLS row and work it into the most relevant existing bullet, citing that source.`,
+          message: `Must-have keyword "${item.keyword}" has real supporting evidence in the profile${citeTxt} but appears in no bullet — work it into the most relevant existing bullet, citing that source.`,
         })
       }
     }
@@ -292,7 +297,7 @@ export function runLint(input: LintInput): LintReport {
   if (scan.staticEcho > 0) {
     issues.push({
       kind: 'static-echo', severity: 'soft',
-      message: `The model echoed ${scan.staticEcho} header/education line${scan.staticEcho === 1 ? '' : 's'} — removed automatically.`,
+      message: `The model echoed ${scan.staticEcho} header/education/skills line${scan.staticEcho === 1 ? '' : 's'} — removed automatically.`,
     })
   }
 

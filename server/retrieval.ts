@@ -331,6 +331,22 @@ export async function retrieve(requirements: RequirementInput[], seed: number | 
     }))
   }
 
+  // ── Skill relevance (drives the deterministically composed skills section) ─
+  const skillScores: Record<string, number> = {}
+  {
+    let maxSkill = 0
+    for (const c of chunks) {
+      if (c.parent_kind === 'skill') maxSkill = Math.max(maxSkill, chunkBest.get(c.id) ?? 0)
+    }
+    if (maxSkill > 0) {
+      for (const c of chunks) {
+        if (c.parent_kind !== 'skill') continue
+        const s = (chunkBest.get(c.id) ?? 0) / maxSkill
+        if (s > 0) skillScores[c.parent_id] = Math.max(skillScores[c.parent_id] ?? 0, s)
+      }
+    }
+  }
+
   return {
     requirements: reqEvidence,
     rankedJobs: rank('job', jobRows, rngJobs),
@@ -339,5 +355,6 @@ export async function retrieve(requirements: RequirementInput[], seed: number | 
     embeddingsUsed,
     indexedChunks: chunks.length,
     seed,
+    skillScores,
   }
 }

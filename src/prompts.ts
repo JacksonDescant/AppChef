@@ -1,4 +1,5 @@
 import type { BulletAllocation, EducationEntry, Job, Profile, Project, RetrievalResult, Skill } from './types'
+import { keywordRegex } from './lib/coverage'
 
 export const EXTRACTION_SYSTEM_PROMPT = `You are a job-posting analyst. Extract the posting's target title and priority requirements. Return ONLY a valid JSON object — no explanation, no preamble, no markdown fences.`
 
@@ -34,17 +35,13 @@ OUTPUT FORMAT:
 [BULLET]What you built and its measurable impact [S2]
 (after " | ", list the 2–5 most job-relevant technologies copied from the project's Technologies list; omit the " | ..." part when no technologies were provided; minimum 2, maximum 3 bullets per project; most relevant projects only)
 
-[SECTION]TECHNICAL SKILLS
-[SKILL]Category: skill1, skill2, skill3
-(3–4 rows; order skills within each row so the ones matching the target job description come first)
-
 RULES:
-1. Use ONLY the tagged lines above. No other text or blank lines between tags. NEVER output [NAME], [CONTACT], [EDU_INST], [EDU_DEG], or an EDUCATION section — the header and education are added automatically from the candidate's profile.
+1. Use ONLY the tagged lines above. No other text or blank lines between tags. NEVER output [NAME], [CONTACT], [EDU_INST], [EDU_DEG], [SKILL], an EDUCATION section, or a TECHNICAL SKILLS section — the header, education, and skills sections are composed automatically from the candidate's profile.
 2. The \\t in two-column lines is a literal tab character separating left content from right content.
 3. Bullets must be concise — one line each. Quantify impact wherever the source data supports it.
 4. GROUNDING — CITATIONS REQUIRED: Every [BULLET] line must end with a citation tag: [S1] for a single source, [S1,S3] when synthesizing across multiple. The numbers correspond to [S#] labels in the candidate's profile data. If a bullet draws from an entry's Description field (not a numbered bullet), use [Sdesc]. Citations are stripped from the final resume output — they exist only to enforce factual grounding. You MAY: reframe and strengthen language, change emphasis to match the role, synthesize across multiple source bullets, and highlight the natural significance and implications of the candidate's actual work — even if the source phrasing is plain. You MAY NOT: introduce specific numbers, metrics, team sizes, dollar figures, dates, or concrete outcomes that are not present in the cited source(s). If source [S2] says "improved performance", you may write "drove critical performance improvements [S2]" — but NOT "improved performance by 40% [S2]" unless 40% appears in [S2].
-5. KEYWORDS — COVERAGE, NOT FREQUENCY: Mirror keywords and technical terms from the job description naturally and truthfully. Address each job requirement ONCE with evidence; never use any keyword more than twice across the entire resume. When a PRIORITY KEYWORDS list is provided: every must-have keyword the candidate's data genuinely supports must appear once in TECHNICAL SKILLS and once inside a [BULLET] (or [SUMMARY]) with supporting evidence. Skip keywords the candidate's data cannot support — never invent experience to cover a keyword.
-6. ACRONYMS: In TECHNICAL SKILLS, write the first mention of an acronym as the spelled-out form plus the acronym — "Amazon Web Services (AWS)", "Continuous Integration/Continuous Deployment (CI/CD)" — but only when you are certain of the standard expansion; otherwise keep the acronym alone. Everywhere else, use the same form the job description uses.
+5. KEYWORDS — COVERAGE, NOT FREQUENCY: Mirror keywords and technical terms from the job description naturally and truthfully. Address each job requirement ONCE with evidence; never use any keyword more than twice across the entire resume. When a PRIORITY KEYWORDS list is provided: every must-have keyword the candidate's data genuinely supports must appear inside a [BULLET] (or [SUMMARY]) with supporting evidence — the TECHNICAL SKILLS section is composed automatically from the profile and already lists the matching skills. Skip keywords the candidate's data cannot support — never invent experience to cover a keyword.
+6. ACRONYMS: use the same form the job description uses. When a bullet first mentions an acronym the job description spells out, you may spell it out once — never expand an acronym you are not certain of.
 7. ORDERING IS MANDATORY: every section must appear in strict reverse-chronological order by END DATE — most recent end date first. "Present" is the most recent possible end date. This cannot be changed for any reason, including relevance to the job. Recency weighting affects bullet count and detail, not the order entries appear. The candidate's entries are pre-sorted — output them in the EXACT ORDER they are provided.
 8. BULLET ORDER WITHIN AN ENTRY: order each entry's bullets by relevance to the target job, most relevant first. The FIRST bullet of the MOST RECENT job must address the job description's single most important requirement that the candidate's data supports — recruiters read that line first. When an entry's profile data includes a "Most relevant to this JD" line, build that entry's bullets around those cited sources first.
 9. VERB VARIETY: start each bullet with a concrete action verb; never reuse the same opening verb twice in the resume; prefer verbs drawn from the candidate's own source data. Do not use: ${BANNED_VERBS.join(', ')}.
@@ -67,7 +64,7 @@ EDIT CONTRACT — this overrides everything except factual accuracy:
 2. Do not re-tailor, rephrase, reorder, add, or remove anything the request does not ask for. If the request targets one bullet, every other bullet stays untouched.
 3. The current resume already fills exactly one page. Keep the total number of [BULLET] lines the same unless the request itself adds or removes content. If the request removes an entry, redistribute roughly that many bullets across the remaining entries (within the caps below); if it adds an entry, trim the least job-relevant bullets elsewhere to make room.
 
-FORMAT (identical to the current resume): [SUMMARY], [SECTION], [JOB_CO]Company\\tCity, [JOB_ROLE]Title\\tDates, [PROJECT]Name | Tech\\tDates, [BULLET]text, [SKILL]Category: items. The \\t is a literal tab character. NEVER output [NAME], [CONTACT], [EDU_INST], [EDU_DEG], or an EDUCATION section — the header and education are added automatically.
+FORMAT (identical to the current resume): [SUMMARY], [SECTION], [JOB_CO]Company\\tCity, [JOB_ROLE]Title\\tDates, [PROJECT]Name | Tech\\tDates, [BULLET]text. The \\t is a literal tab character. NEVER output [NAME], [CONTACT], [EDU_INST], [EDU_DEG], [SKILL], an EDUCATION section, or a TECHNICAL SKILLS section — header, education, and skills are composed automatically.
 
 RULES FOR LINES YOU CHANGE OR ADD (lines copied unchanged are exempt):
 1. GROUNDING: every new or rewritten [BULLET] must end with a citation tag — [S1], or [S1,S3] when synthesizing — pointing at the numbered source bullets in the candidate profile ([Sdesc] for an entry's Description field). Never introduce numbers, metrics, team sizes, dates, or outcomes that are not in the cited source. Bullets copied verbatim from the current resume carry no citation.
@@ -138,22 +135,23 @@ function resumeTitle(j: Job): string {
 
 // ─── Page budget calculator ───────────────────────────────────────────────────
 // Approximates the LaTeX renderer (Jake's Resume template, server/latex.ts):
-// letterpaper with 0.5in side margins, 11pt Computer Modern (~13.6pt lines).
+// letterpaper with 0.5in side margins, 10pt Latin Modern (~11pt \small lines)
+// after the 2026-08-15 densify pass (\huge name, tighter section spacing).
 // The hard one-page guarantee lives server-side (squeeze presets + content
 // drops in server/tectonic.ts); this budget only needs to be close enough
 // that the LLM writes roughly the right amount and drops rarely fire.
 const PDF = {
   pageH: 792, mt: 36, mb: 36,   // usable ≈ 720pt
-  header: 58,       // \Huge name + contact line + gap
-  sectionHdr: 31,   // \large small-caps title + titlerule + eased boundary spacing
-  eduEntry: 30,     // \resumeSubheading (two rows)
+  header: 44,       // \huge name + contact line + gap
+  sectionHdr: 25,   // \large small-caps title + titlerule + eased boundary spacing
+  eduEntry: 25,     // \resumeSubheading (two rows)
   eduGap: 4,        // gap between edu entries
-  jobHdr: 30,       // \resumeSubheading (two rows)
+  jobHdr: 25,       // \resumeSubheading (two rows)
   jobGap: 4,        // spacing before each job
-  projectHdr: 22,   // \resumeProjectHeading (single row)
-  skillRow: 17,     // one \small skill line (wrap allowance)
-  bullet: 18,       // one \small bullet at 11pt + itemSep 2 (wrap allowance)
-  summaryText: 40,  // 2–3 wrapped \small summary lines
+  projectHdr: 17,   // \resumeProjectHeading (single row)
+  skillRow: 14,     // one \small skill line (wrap allowance)
+  bullet: 15,       // one \small bullet at 10pt + itemSep 1 (wrap allowance)
+  summaryText: 33,  // 2–3 wrapped \small summary lines
 }
 
 function bulletBudget(nJobs: number, nEdus: number, nProjects: number, nSkillCats: number, hasSummary: boolean): number {
@@ -230,7 +228,7 @@ export function buildShortlistMessage(
     `Work experience, ranked by the relevance engine (best first):\n${jobLines || '(none)'}\n\n` +
     `Projects, ranked by the relevance engine (best first):\n${projectLines || '(none)'}\n\n` +
     `---\n\n` +
-    `A strong one-page resume typically shows 2-4 work experiences and 1-2 projects — quality over quantity.\n\n` +
+    `This is a dense single-page resume: target 5-7 total entries — typically 3-5 work experiences plus 2 projects. Keep borderline-but-relevant entries; the page has room for them.\n\n` +
     `SELECTION RULES:\n` +
     `1. Trust the ranking unless you see a clear semantic mismatch the scores missed (e.g. same tools, unrelated domain).\n` +
     `2. Always include the most recent work experience unless it is completely unrelated to this role.\n` +
@@ -308,6 +306,12 @@ export function parseShortlist(
   }
 }
 
+// Owner rule 2026-08-15: a resume shows 5–7 total entries. The budget math
+// enforces the lower end (thin selections get expanded); this cap enforces
+// the upper — more than 7 means every entry runs at the 2-bullet minimum and
+// none gets room to make its case.
+const MAX_ENTRIES = 7
+
 // Mirror of trimToPageFit: with bullets capped at 3 per entry (rule 15), a
 // small selection cannot fill the page vertically — pages must fill
 // horizontally, with more entries. Re-adds the next-ranked unselected entries
@@ -327,6 +331,7 @@ export function expandToPageFit(
   const jobPool = rankedJobIds.filter(id => !jIds.includes(id))
   const projPool = rankedProjectIds.filter(id => !pIds.includes(id))
   while (jobPool.length > 0 || projPool.length > 0) {
+    if (jIds.length + pIds.length >= MAX_ENTRIES) break
     const budget = bulletBudget(jIds.length, nEdus, pIds.length, nSkillCats, hasSummary)
     if (3 * (jIds.length + pIds.length) + 1 >= budget) break
     if (projPool.length > 0 && (pIds.length < 2 || jobPool.length === 0)) {
@@ -357,7 +362,9 @@ export function trimToPageFit(
     const n = jIds.length + pIds.length
     if (n === 0) break
     const budget = bulletBudget(jIds.length, nEdus, pIds.length, nSkillCats, hasSummary)
-    if (budget >= 2 * n + 2) break
+    // Over the entry cap, every entry runs at the 2-bullet minimum — trim
+    // even when the budget technically tolerates it.
+    if (n <= MAX_ENTRIES && budget >= 2 * n + 2) break
     if (pIds.length > 2) { pIds = pIds.slice(0, -1); continue }
     if (jIds.length > 2) { jIds = jIds.slice(0, -1); continue }
     if (pIds.length > 1) { pIds = pIds.slice(0, -1); continue }
@@ -374,6 +381,78 @@ function groupSkillsByCategory(skills: Skill[]): Record<string, string[]> {
     acc[cat].push(s.level ? `${s.name} (${s.level})` : s.name)
     return acc
   }, {})
+}
+
+// ─── Deterministic TECHNICAL SKILLS composition ──────────────────────────────
+// Like the header and education, the skills section is composed from profile
+// data, never written by the model (owner rule 2026-08-15 — the LLM's ad-hoc
+// merging of many categories into "3–4 rows" produced jumbled output, and the
+// auto-repass kept stuffing keywords into it). Rows are capped at 4: the
+// highest-relevance categories keep their names, the tail folds into "Other".
+// Within rows, JD-matching skills come first, then retrieval-scored ones.
+
+const MAX_SKILL_ROWS = 4
+const MAX_SKILLS_PER_ROW = 10
+
+export function skillRowCount(skills: Skill[]): number {
+  if (skills.length === 0) return 0
+  return Math.min(MAX_SKILL_ROWS, new Set(skills.map(s => s.category || 'General')).size)
+}
+
+export function buildSkillLines(
+  skills: Skill[],
+  keywords: JdKeywords | null,
+  retrieval: RetrievalResult | null,
+): string {
+  if (skills.length === 0) return ''
+  const kwList = keywords ? [...keywords.mustHave, ...keywords.niceToHave] : []
+  const jdHit = (name: string) => kwList.some(kw =>
+    (keywordRegex(kw)?.test(name) ?? false) || (keywordRegex(name)?.test(kw) ?? false))
+  const idx = new Map(skills.map((s, i) => [s.id, i]))
+  const priority = (s: Skill) =>
+    (jdHit(s.name) ? 2 : 0) + (retrieval?.skillScores?.[s.id] ?? 0)
+  // Cross-category dedupe: profiles accumulate the same skill under several
+  // categories ("Node.js" in Frontend AND General AND Other) — keep only the
+  // highest-priority occurrence so no name repeats across rows.
+  const seen = new Set<string>()
+  const byPriority = [...skills]
+    .sort((a, b) => (priority(b) - priority(a)) || (idx.get(a.id)! - idx.get(b.id)!))
+    .filter(s => {
+      const key = s.name.trim().toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+
+  // Group by category; category order = best member's priority (first
+  // appearance in the priority-sorted list), members stay priority-ordered.
+  const cats = new Map<string, Skill[]>()
+  for (const s of byPriority) {
+    const c = s.category || 'General'
+    if (!cats.has(c)) cats.set(c, [])
+    cats.get(c)!.push(s)
+  }
+  const catList = [...cats.entries()]
+  const rows: { label: string; items: Skill[] }[] = []
+  if (catList.length <= MAX_SKILL_ROWS) {
+    for (const [label, items] of catList) rows.push({ label, items })
+  } else {
+    for (const [label, items] of catList.slice(0, MAX_SKILL_ROWS - 1)) rows.push({ label, items })
+    const other = catList.slice(MAX_SKILL_ROWS - 1).flatMap(([, items]) => items)
+    other.sort((a, b) => (priority(b) - priority(a)) || (idx.get(a.id)! - idx.get(b.id)!))
+    rows.push({ label: 'Other', items: other })
+  }
+
+  return rows.map(r => {
+    // Row-length cap drops the least relevant overflow — but never a skill
+    // that matches this JD's keywords. Levels are omitted: proficiency tags
+    // add noise, not ATS signal (docs/ats-research.md).
+    const kept = r.items.slice(0, MAX_SKILLS_PER_ROW)
+    for (const s of r.items.slice(MAX_SKILLS_PER_ROW)) {
+      if (jdHit(s.name)) kept.push(s)
+    }
+    return `[SKILL]${r.label}: ${kept.map(s => s.name).join(', ')}`
+  }).join('\n')
 }
 
 // Resolves an entry's top-ranked bullets (retrieval's jittered + MMR order)
@@ -485,12 +564,12 @@ function buildProfileContext(data: ResumeData, profile: Profile | null, retrieva
 // fill loop can tell whether a corrective pass would actually change anything.
 // `bulletBonus` folds in the measured shortfall from a real compile.
 export function pageFillCount(data: ResumeData, hasSummary: boolean, bulletBonus = 0): number {
-  const byCategory = groupSkillsByCategory(data.skills)
   const budget = bulletBudget(
     data.jobs.length,
     data.education.length,
     data.projects.length,
-    Object.keys(byCategory).length,
+    // the composed skills section renders at most MAX_SKILL_ROWS rows
+    skillRowCount(data.skills),
     hasSummary,
   )
   const n = data.jobs.length + data.projects.length
@@ -620,33 +699,37 @@ export function buildEducationLines(education: EducationEntry[]): string {
 }
 
 // Defense against the model echoing statically-composed content despite
-// rule 1: drops header/education tag lines and any EDUCATION section
-// wholesale (including stray bullets inside it, which would otherwise
-// re-attach to the previous entry when parsed).
+// rule 1: drops header/education/skills tag lines and any EDUCATION or
+// TECHNICAL SKILLS section wholesale (including stray bullets inside them,
+// which would otherwise re-attach to the previous entry when parsed).
 export function stripStaticTags(text: string): string {
   const out: string[] = []
-  let inEducation = false
+  let inStatic = false
   for (const line of text.split('\n')) {
     if (line.startsWith('[SECTION]')) {
-      inEducation = line.slice(9).trim().toUpperCase() === 'EDUCATION'
-      if (inEducation) continue
+      const title = line.slice(9).trim().toUpperCase()
+      inStatic = title === 'EDUCATION' || title === 'TECHNICAL SKILLS' || title === 'SKILLS'
+      if (inStatic) continue
     }
-    if (inEducation) continue
+    if (inStatic) continue
     if (line.startsWith('[NAME]') || line.startsWith('[CONTACT]')
-      || line.startsWith('[EDU_INST]') || line.startsWith('[EDU_DEG]')) continue
+      || line.startsWith('[EDU_INST]') || line.startsWith('[EDU_DEG]')
+      || line.startsWith('[SKILL]')) continue
     out.push(line)
   }
   return out.join('\n')
 }
 
 // Final document assembly: statically-composed header + summary (hoisted from
-// wherever the model emitted it) + education + the model's cleaned sections.
-export function assembleResume(header: string, education: string, modelOutput: string): string {
+// wherever the model emitted it) + education + the model's cleaned sections +
+// the deterministically composed skills section last.
+export function assembleResume(header: string, education: string, modelOutput: string, skillLines = ''): string {
   const cleaned = stripCitations(enforceChronologicalOrder(stripStaticTags(modelOutput))).trim()
   const lines = cleaned ? cleaned.split('\n') : []
   const summary = lines.filter(l => l.startsWith('[SUMMARY]'))
   const rest = lines.filter(l => !l.startsWith('[SUMMARY]')).join('\n').trim()
-  return [header, summary.join('\n'), education, rest].filter(Boolean).join('\n')
+  const skillsBlock = skillLines ? `[SECTION]TECHNICAL SKILLS\n${skillLines}` : ''
+  return [header, summary.join('\n'), education, rest, skillsBlock].filter(Boolean).join('\n')
 }
 
 // Mirrors the [S#] numbering that buildProfileContext assigns to bullet lines

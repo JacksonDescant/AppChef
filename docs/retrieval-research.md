@@ -305,3 +305,37 @@ selection. A major contributor to the "same resume every time" problem.
 {"enable_thinking": false}` (verified: 0 reasoning tokens; the `/no_think` soft switch
 does NOT work on Qwen 3.6). Extraction and shortlist use it; generation and refine
 keep thinking.
+
+Follow-up, same day: `max_tokens` caps are removed from every call entirely (the
+field is omitted, so completions run to EOS or the server's context limit — the caps
+were the truncation mechanism in the first place, and the Settings "Max Tokens" field
+is gone with them). `noThink` stays: it saves real seconds on the tiny JSON calls,
+and on runtimes that ignore `chat_template_kwargs` an uncapped call still delivers
+its answer after thinking instead of getting truncated.
+
+### 7.6 Densified layout + deterministic skills (2026-08-15, same day)
+
+Problem: too little experience fit the page (4–5 entries), and the TECHNICAL
+SKILLS section came out jumbled — the profile has 31 skills across 9
+categories, the prompt demanded "3–4 rows", so the model invented ad-hoc
+merges, and the auto-repass kept stuffing keywords into them. Decisions:
+5–7 total entries, smaller type, skills composed by code.
+
+- **Layout:** 10pt base across all squeeze presets (was 11pt for the first
+  two), `\huge` name (was `\Huge`), tighter section spacing at preset 0, and a
+  new harder max-squeeze rung. Client budget constants recalibrated against
+  real tectonic compiles: 6-entry/19-bullet and 7-entry/18-bullet fixtures
+  land at 95–97% fill on one page at preset 0. Real profile now selects
+  7 entries (19 bullets) without a summary, 6 with.
+- **TECHNICAL SKILLS is now composed, never generated** — same rule as the
+  header and education. `buildSkillLines` (src/prompts.ts): skills are
+  priority-scored (JD keyword match = +2, plus the retrieval engine's new
+  per-skill `skillScores`), deduplicated case-insensitively across categories
+  (profiles accumulate "Node.js" under three categories), grouped into at
+  most 4 rows — highest-relevance categories keep their names, the tail folds
+  into "Other" — capped at 10 skills per row (JD-matching skills are never
+  dropped), proficiency levels omitted. The model is forbidden from emitting
+  [SKILL]/TECHNICAL SKILLS (stripStaticTags removes echoes); the page-budget
+  math charges exactly the composed row count. Lint's covered-but-missing
+  check now demands bullet coverage only — the skills half of rule 5 is
+  guaranteed by construction.

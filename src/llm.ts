@@ -4,12 +4,15 @@ export interface StreamOptions {
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>
   system?: string
   temperature?: number
+  // Optional completion cap. Omitted by default — the model runs to EOS (or
+  // the server's context limit). Caps were the truncation mechanism behind
+  // the thinking-starvation bug, so nothing in the app sets one anymore.
   maxTokens?: number
   // Disable the model's thinking phase (llama.cpp + reasoning chat templates
-  // like Qwen 3.6). Small JSON calls (extraction, shortlist) MUST set this:
-  // reasoning alone can exceed their max_tokens, returning empty content and
-  // silently degrading the pipeline to its recency fallback. Servers without
-  // template kwargs support simply ignore the extra field.
+  // like Qwen 3.6). Small JSON calls (extraction, shortlist) set this:
+  // reasoning burns real seconds for zero benefit on a tiny JSON answer, and
+  // on runtimes that ignore chat_template_kwargs it would only cost latency,
+  // not correctness, now that completions are uncapped.
   noThink?: boolean
 }
 
@@ -27,7 +30,7 @@ export async function* streamCompletion({
   messages,
   system,
   temperature = 0.7,
-  maxTokens = 2048,
+  maxTokens,
   noThink = false,
 }: StreamOptions): AsyncGenerator<string> {
   const fullMessages = system
@@ -42,7 +45,7 @@ export async function* streamCompletion({
       messages: fullMessages,
       stream: true,
       temperature,
-      max_tokens: maxTokens,
+      ...(maxTokens != null ? { max_tokens: maxTokens } : {}),
       ...(noThink ? { chat_template_kwargs: { enable_thinking: false } } : {}),
     }),
   })

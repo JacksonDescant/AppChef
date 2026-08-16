@@ -27,7 +27,7 @@ npm install                                                        # first time 
 npm run dev                                                        # client (vite, :5173) + API (express, :3001)
 ```
 
-Open http://localhost:5173. The Settings page holds the endpoint URL (`:8080` llama.cpp / `:11434` Ollama / `:1234` LM Studio), model name, temperature, and max tokens. On first launch the server also downloads the embedding model (~140MB, one-time) — fully offline after that.
+Open http://localhost:5173. The Settings page holds the endpoint URL (`:8080` llama.cpp / `:11434` Ollama / `:1234` LM Studio) and model name. Sampling is fixed per pipeline stage (generation 0.7, refine 0.3, extraction/shortlist 0.1) and completions are never token-capped — every call runs until the model finishes. On first launch the server also downloads the embedding model (~140MB, one-time) — fully offline after that.
 
 Data lives in `appchef.db` (SQLite) next to the code. Settings → Resume Data exports/imports the profile as JSON.
 
@@ -42,7 +42,7 @@ Other scripts: `npm run typecheck`, `npm run lint`, `npm run build`, `npm run ch
 1. **Extract** — a small LLM call pulls the JD's target title + must-have/nice-to-have skill terms (thinking disabled; reasoning would starve the token budget).
 2. **Score** — deterministic retrieval matches every requirement against every profile bullet: BM25 (FTS5) + embedding cosine, rank-fused. Requirements that match nothing become explicit *gaps* (never faked). Entries and bullets get ranked per-JD; a fresh random seed adds bounded jitter so near-ties can swap between generations — a clearly better entry can never lose its spot.
 3. **Shortlist** — one listwise LLM call confirms/trims the ranked entries; deterministic expand/trim guarantees the selection can fill exactly one page.
-4. **Generate** — the model writes the resume in a tagged line format, guided by a per-entry bullet allocation (extra bullets go to the most JD-relevant entries), a requirement→evidence map, and "most relevant to this JD" bullet annotations. Header and education are composed from profile data, never generated.
+4. **Generate** — the model writes the resume in a tagged line format, guided by a per-entry bullet allocation (extra bullets go to the most JD-relevant entries), a requirement→evidence map, and "most relevant to this JD" bullet annotations. Header, education, and the TECHNICAL SKILLS section are composed from profile data, never generated — skills render as ≤4 deduplicated rows with JD-relevant skills first. The dense 10pt layout targets 5–7 total entries per page.
 5. **Fill** — the real compiled page is measured; if meaningfully short, one corrective pass adds the next-ranked entry.
 6. **Review + auto-fix** — deterministic lint checks the draft (citations valid, no banned/duplicate verbs, bullet counts, keyword overuse, must-haves with profile evidence that got left out). Hard violations trigger ONE automatic refine pass with the specific issues as edit instructions. The critic is code, never the model grading itself.
 7. **Score panel** — the final text is scored against the requirements (exact hits + embedding similarity, thresholds calibrated on real data) and shown as a coverage percentage with per-requirement verdicts.

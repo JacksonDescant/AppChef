@@ -146,6 +146,8 @@ export interface RetrievalResult {
   embeddingsUsed: boolean
   indexedChunks: number
   seed: number | null  // jitter seed applied server-side; null = deterministic
+  // skill id → 0–1 relevance to this JD (only skills with any evidence appear)
+  skillScores: Record<string, number>
 }
 
 // ─── Bullet allocation (src/prompts.ts computeBulletAllocation) ──────────────

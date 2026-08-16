@@ -131,14 +131,14 @@ export interface SqueezeKnobs {
   listPost: number     // \vspace after a bullet list
 }
 
-// Preset 0 is the default look: slight air between bullets (itemSep 2) and
-// breathing room at section boundaries (sectionPre/Post eased) so entries
-// don't crowd the title rules. Later presets progressively tighten spacing,
-// then drop to 10pt, for the one-page enforcement loop — cramped is their job.
+// Preset 0 is the default look — 10pt base (owner decision 2026-08-15: denser
+// page, 5–7 entries) with slight air between bullets and eased section
+// boundaries. Later presets progressively tighten spacing for the one-page
+// enforcement loop — cramped is their job.
 export const SQUEEZE_PRESETS: SqueezeKnobs[] = [
-  { fontSize: 11, sectionPre: -2, sectionPost: -2, itemVspace: -2, subheadPre: -2, subheadPost: -7, itemSep: 2, listPost: -5 },
-  { fontSize: 11, sectionPre: -6, sectionPost: -7, itemVspace: -3, subheadPre: -4, subheadPost: -8, itemSep: -2, listPost: -7 },
+  { fontSize: 10, sectionPre: -4, sectionPost: -4, itemVspace: -2, subheadPre: -3, subheadPost: -7, itemSep: 1, listPost: -5 },
   { fontSize: 10, sectionPre: -6, sectionPost: -7, itemVspace: -3, subheadPre: -4, subheadPost: -8, itemSep: -2, listPost: -7 },
+  { fontSize: 10, sectionPre: -8, sectionPost: -8, itemVspace: -4, subheadPre: -5, subheadPost: -9, itemSep: -3, listPost: -8 },
 ]
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
@@ -351,7 +351,7 @@ function renderSummary(summary: string, k: SqueezeKnobs): string {
 export function renderTex(ir: ResumeIR, knobs: SqueezeKnobs): string {
   const body = [
     '\\begin{center}',
-    `    \\textbf{\\Huge \\scshape ${escapeLatex(ir.name)}} \\\\ \\vspace{1pt}`,
+    `    \\textbf{\\huge \\scshape ${escapeLatex(ir.name)}} \\\\ \\vspace{1pt}`,
     `    \\small ${renderContact(ir.contact)}`,
     '\\end{center}',
     '',

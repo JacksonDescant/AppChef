@@ -113,32 +113,6 @@ export default function Settings() {
           </div>
         </Card>
 
-        <Card className="p-5">
-          <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">Generation</p>
-          <div className="grid grid-cols-2 gap-3">
-            <div className="flex flex-col gap-1">
-              <label className="text-xs font-medium text-zinc-400">Temperature</label>
-              <input
-                type="number" min={0} max={2} step={0.1}
-                value={form.temperature}
-                onChange={e => setForm(prev => ({ ...prev, temperature: parseFloat(e.target.value) }))}
-                className="bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-orange-500 transition-colors"
-              />
-              <p className="text-xs text-zinc-600">0 = deterministic, 1 = creative</p>
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs font-medium text-zinc-400">Max Tokens</label>
-              <input
-                type="number" min={256} max={65536} step={1024}
-                value={form.maxTokens}
-                onChange={e => setForm(prev => ({ ...prev, maxTokens: parseInt(e.target.value) }))}
-                className="bg-zinc-800 border border-zinc-700 rounded-md px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-orange-500 transition-colors"
-              />
-              <p className="text-xs text-zinc-600">Max length of generated resume</p>
-            </div>
-          </div>
-        </Card>
-
         <Button type="submit" className="self-start">
           {saved ? <><Check size={13} /> Saved</> : 'Save Settings'}
         </Button>

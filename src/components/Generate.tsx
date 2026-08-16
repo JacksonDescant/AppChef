@@ -9,7 +9,7 @@ import { streamCompletion, checkConnection } from '../llm'
 import {
   SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, SHORTLIST_SYSTEM_PROMPT,
   buildUserMessage, buildRefineMessage, buildExtractionMessage, buildShortlistMessage,
-  computeBulletAllocation, parseExtraction, parseShortlist,
+  buildSkillLines, computeBulletAllocation, parseExtraction, parseShortlist, skillRowCount,
   assembleResume, buildEducationLines, buildHeaderLines, expandToPageFit, pageFillCount, trimToPageFit,
 } from '../prompts'
 import type { JdKeywords, ResumeData } from '../prompts'
@@ -140,7 +140,7 @@ export default function Generate() {
     setError(''); setOutput(''); setJustSaved(false); setLoading(true); setStreaming(false)
     setKeywords(null); setRetrieval(null); setReflection(null)
 
-    const skillCatCount = new Set(skills.map(s => s.category || 'General')).size
+    const skillCatCount = skillRowCount(skills) // composed skills render ≤4 rows
     const hasSummary = Boolean(profile?.summary?.trim())
     let jdKeywords: JdKeywords | null = null
     let retrievalResult: RetrievalResult | null = null
@@ -162,10 +162,11 @@ export default function Generate() {
       for await (const chunk of streamCompletion({
         endpoint: settings.llamaEndpoint, model: settings.modelName,
         messages: [{ role: 'user', content: buildExtractionMessage(jobDescription) }],
-        // noThink is load-bearing: on reasoning models the thinking phase
-        // alone can exceed this budget, returning EMPTY content — which
-        // silently collapsed the whole pipeline to the recency fallback.
-        temperature: 0.1, maxTokens: 768, noThink: true,
+        // noThink: reasoning buys nothing on a tiny JSON answer and costs
+        // real seconds. (Historically its thinking also starved this call's
+        // token cap, silently collapsing the pipeline to the recency
+        // fallback — caps are gone now, but the latency point stands.)
+        temperature: 0.1, noThink: true,
         system: EXTRACTION_SYSTEM_PROMPT,
       })) { extText += chunk }
       jdKeywords = parseExtraction(extText)
@@ -211,9 +212,9 @@ export default function Generate() {
         for await (const chunk of streamCompletion({
           endpoint: settings.llamaEndpoint, model: settings.modelName,
           messages: [{ role: 'user', content: buildShortlistMessage({ jobs, education, projects, skills }, retrievalResult, jdKeywords) }],
-          // noThink for the same reason as extraction: reasoning would eat
-          // this small budget before any JSON appeared.
-          temperature: 0.1, maxTokens: 256, noThink: true,
+          // noThink for the same reason as extraction: a one-line JSON pick
+          // doesn't need a reasoning phase.
+          temperature: 0.1, noThink: true,
           system: SHORTLIST_SYSTEM_PROMPT,
         })) { selText += chunk }
         const { jobIds, projectIds } = parseShortlist(
@@ -254,6 +255,9 @@ export default function Generate() {
     setStreaming(true)
     const header = buildHeaderLines(profile)
     const eduLines = buildEducationLines(education)
+    // Skills are composed deterministically per JD (relevance-ordered rows) —
+    // the model never writes the TECHNICAL SKILLS section.
+    const skillLines = buildSkillLines(skills, jdKeywords, retrievalResult)
     const staticPrefix = [header, eduLines].filter(Boolean).map(s => s + '\n').join('')
 
     const runGeneration = async (selJobs: Job[], selProjects: Project[], bulletBonus: number): Promise<{ final: string; rawBody: string }> => {
@@ -268,7 +272,6 @@ export default function Generate() {
         const gen = streamCompletion({
           endpoint: settings.llamaEndpoint, model: settings.modelName,
           messages: [{ role: 'user', content: userMessage }],
-          temperature: settings.temperature, maxTokens: settings.maxTokens,
           system: SYSTEM_PROMPT,
         })
         for await (const chunk of gen) {
@@ -276,7 +279,7 @@ export default function Generate() {
           setOutput(prev => prev + chunk)
         }
       } finally {
-        final = assembleResume(header, eduLines, raw.slice(staticPrefix.length))
+        final = assembleResume(header, eduLines, raw.slice(staticPrefix.length), skillLines)
         setOutput(final)
       }
       // rawBody keeps the model's citations — assembleResume strips them, and
@@ -400,6 +403,7 @@ export default function Generate() {
   }): Promise<{ final: string; rawBody: string } | null> {
     const header = buildHeaderLines(profile)
     const eduLines = buildEducationLines(args.data.education)
+    const skillLines = buildSkillLines(args.data.skills, args.keywords, args.retrieval)
     const staticPrefix = [header, eduLines].filter(Boolean).map(s => s + '\n').join('')
     setOutput(staticPrefix)
     let raw = staticPrefix
@@ -410,9 +414,9 @@ export default function Generate() {
       const gen = streamCompletion({
         endpoint: settings.llamaEndpoint, model: settings.modelName,
         messages: [{ role: 'user', content: userMessage }],
-        // Refine must reproduce untouched lines verbatim — cap the sampling
-        // temperature so copying fidelity doesn't degrade at creative settings
-        temperature: Math.min(settings.temperature, 0.3), maxTokens: settings.maxTokens,
+        // Refine must reproduce untouched lines verbatim — a low fixed
+        // temperature keeps copying fidelity high
+        temperature: 0.3,
         system: REFINE_SYSTEM_PROMPT,
       })
       for await (const chunk of gen) {
@@ -420,7 +424,7 @@ export default function Generate() {
         setOutput(prev => prev + chunk)
       }
       const rawBody = raw.slice(staticPrefix.length)
-      const final = assembleResume(header, eduLines, rawBody)
+      const final = assembleResume(header, eduLines, rawBody, skillLines)
       setOutput(final)
       return { final, rawBody }
     } catch (e) {
