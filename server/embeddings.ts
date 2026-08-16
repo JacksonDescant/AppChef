@@ -66,6 +66,21 @@ export async function embedDocuments(texts: string[]): Promise<Float32Array[] | 
   }
 }
 
+// Batched query-prefix embedding — one extractor call for a whole requirement
+// list (used by output scoring; embedQuery stays for the retrieval path).
+export async function embedQueries(texts: string[]): Promise<Float32Array[] | null> {
+  if (texts.length === 0) return []
+  await ensureEmbeddings()
+  if (state !== 'ready' || !extractor) return null
+  try {
+    const out = await extractor(texts.map(t => `search_query: ${t}`), { pooling: 'mean', normalize: true })
+    return out.tolist().map(v => Float32Array.from(v))
+  } catch (e) {
+    console.warn(`[retrieval] query embedding failed: ${(e as Error).message}`)
+    return null
+  }
+}
+
 export async function embedQuery(text: string): Promise<Float32Array | null> {
   await ensureEmbeddings()
   if (state !== 'ready' || !extractor) return null

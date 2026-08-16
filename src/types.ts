@@ -127,16 +127,85 @@ export interface RequirementEvidence {
 
 export interface RankedEntry {
   id: string
-  score: number       // normalized 0–1 within its list
+  score: number       // normalized 0–1 within its list (post-jitter when seeded)
+  baseScore?: number  // pre-jitter normalized score — diagnostics & near-tie tests
   matched: string[]   // requirement texts this entry evidences
+}
+
+export interface BulletRank {
+  text: string   // the bullet's raw text
+  score: number  // 0–1 relevance to this JD within its entry (0 = no evidence)
 }
 
 export interface RetrievalResult {
   requirements: RequirementEvidence[]
   rankedJobs: RankedEntry[]
   rankedProjects: RankedEntry[]
-  // per parent entry: its bullet raw texts ranked by JD relevance (best first)
-  bulletRanks: Record<string, string[]>
+  // per parent entry: bullets ranked for this JD (jittered + MMR-diversified)
+  bulletRanks: Record<string, BulletRank[]>
   embeddingsUsed: boolean
   indexedChunks: number
+  seed: number | null  // jitter seed applied server-side; null = deterministic
+}
+
+// ─── Bullet allocation (src/prompts.ts computeBulletAllocation) ──────────────
+// Explicit per-entry bullet counts injected into the generation prompt.
+
+export interface BulletAllocationEntry {
+  id: string
+  kind: 'job' | 'project'
+  label: string  // display label exactly as the prompt shows it
+  count: number
+}
+
+export interface BulletAllocation {
+  entries: BulletAllocationEntry[]  // in resume display order (recency)
+  total: number                     // sum of counts — the page-fill target
+}
+
+// ─── Reflection: deterministic output lint + requirement scoring ─────────────
+// The critic is code + embeddings, never the LLM (docs/retrieval-research.md §7).
+
+export type LintSeverity = 'hard' | 'soft'
+
+export type LintKind =
+  | 'missing-citation'
+  | 'bad-citation'
+  | 'banned-verb'
+  | 'duplicate-opener'
+  | 'bullet-count'
+  | 'missing-entry'
+  | 'keyword-overuse'
+  | 'untagged-line'
+  | 'static-echo'
+  | 'number-suspicion'
+  | 'missing-covered-keyword'
+
+export interface LintIssue {
+  kind: LintKind
+  severity: LintSeverity
+  message: string      // imperative sentence — doubles as a repass instruction
+  entryLabel?: string  // company / project name when attributable
+  bulletText?: string  // offending bullet text (for display)
+}
+
+export interface LintReport {
+  issues: LintIssue[]
+  hard: LintIssue[]   // trigger the automatic refine repass
+  soft: LintIssue[]   // display only
+}
+
+export interface ScoreRequirement {
+  text: string
+  required: boolean
+  exact: boolean             // word-boundary hit in some resume line
+  bestCosine: number | null  // null when embeddings unavailable
+  bestBullet: string | null
+  verdict: 'strong' | 'partial' | 'absent'
+}
+
+export interface ScoreResult {
+  perRequirement: ScoreRequirement[]
+  overall: number       // 0–100 weighted requirement coverage
+  embeddingsUsed: boolean
 }

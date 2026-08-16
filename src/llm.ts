@@ -5,6 +5,12 @@ export interface StreamOptions {
   system?: string
   temperature?: number
   maxTokens?: number
+  // Disable the model's thinking phase (llama.cpp + reasoning chat templates
+  // like Qwen 3.6). Small JSON calls (extraction, shortlist) MUST set this:
+  // reasoning alone can exceed their max_tokens, returning empty content and
+  // silently degrading the pipeline to its recency fallback. Servers without
+  // template kwargs support simply ignore the extra field.
+  noThink?: boolean
 }
 
 interface ChatCompletionChunk {
@@ -22,6 +28,7 @@ export async function* streamCompletion({
   system,
   temperature = 0.7,
   maxTokens = 2048,
+  noThink = false,
 }: StreamOptions): AsyncGenerator<string> {
   const fullMessages = system
     ? [{ role: 'system' as const, content: system }, ...messages]
@@ -36,6 +43,7 @@ export async function* streamCompletion({
       stream: true,
       temperature,
       max_tokens: maxTokens,
+      ...(noThink ? { chat_template_kwargs: { enable_thinking: false } } : {}),
     }),
   })
 

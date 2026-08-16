@@ -9,13 +9,16 @@ import { streamCompletion, checkConnection } from '../llm'
 import {
   SYSTEM_PROMPT, REFINE_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, SHORTLIST_SYSTEM_PROMPT,
   buildUserMessage, buildRefineMessage, buildExtractionMessage, buildShortlistMessage,
-  parseExtraction, parseShortlist,
+  computeBulletAllocation, parseExtraction, parseShortlist,
   assembleResume, buildEducationLines, buildHeaderLines, expandToPageFit, pageFillCount, trimToPageFit,
 } from '../prompts'
-import type { JdKeywords } from '../prompts'
+import type { JdKeywords, ResumeData } from '../prompts'
 import { computeCoverage } from '../lib/coverage'
+import { buildLintInstruction, runLint } from '../lib/lint'
+import ReflectionPanel from './ReflectionPanel'
+import type { ReflectionState } from './ReflectionPanel'
 import { Button, Card } from './ui'
-import type { Job, EducationEntry, Project, Skill, SavedResume, Profile, RequirementInput, RetrievalResult } from '../types'
+import type { Job, EducationEntry, Project, Skill, SavedResume, Profile, LintIssue, RequirementInput, RetrievalResult, ScoreResult } from '../types'
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-US', {
@@ -53,9 +56,11 @@ export default function Generate() {
   const [justSaved, setJustSaved] = useState(false)
   const [connected, setConnected] = useState<boolean | null>(null)
   const [refineInstructions, setRefineInstructions] = useState('')
-  const [phase, setPhase] = useState<'idle' | 'extracting' | 'scoring' | 'shortlisting' | 'generating' | 'filling'>('idle')
+  const [phase, setPhase] = useState<'idle' | 'extracting' | 'scoring' | 'shortlisting' | 'generating' | 'filling' | 'reflecting' | 'repassing'>('idle')
   const [keywords, setKeywords] = useState<JdKeywords | null>(null)
   const [retrieval, setRetrieval] = useState<RetrievalResult | null>(null)
+  const [reflection, setReflection] = useState<ReflectionState | null>(null)
+  const runSeq = useRef(0) // orphans stale reflection continuations (same pattern as previewSeq)
 
   // Live PDF preview
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null)
@@ -131,8 +136,9 @@ export default function Generate() {
   async function generate() {
     if (!jobDescription.trim()) { setError('Paste a job description first.'); return }
     if (profileEmpty) { setError('Add some experience in the other sections first.'); return }
+    const runId = ++runSeq.current
     setError(''); setOutput(''); setJustSaved(false); setLoading(true); setStreaming(false)
-    setKeywords(null); setRetrieval(null)
+    setKeywords(null); setRetrieval(null); setReflection(null)
 
     const skillCatCount = new Set(skills.map(s => s.category || 'General')).size
     const hasSummary = Boolean(profile?.summary?.trim())
@@ -156,7 +162,10 @@ export default function Generate() {
       for await (const chunk of streamCompletion({
         endpoint: settings.llamaEndpoint, model: settings.modelName,
         messages: [{ role: 'user', content: buildExtractionMessage(jobDescription) }],
-        temperature: 0.1, maxTokens: 768,
+        // noThink is load-bearing: on reasoning models the thinking phase
+        // alone can exceed this budget, returning EMPTY content — which
+        // silently collapsed the whole pipeline to the recency fallback.
+        temperature: 0.1, maxTokens: 768, noThink: true,
         system: EXTRACTION_SYSTEM_PROMPT,
       })) { extText += chunk }
       jdKeywords = parseExtraction(extText)
@@ -174,10 +183,14 @@ export default function Generate() {
           ...jdKeywords.mustHave.map(text => ({ text, required: true })),
           ...jdKeywords.niceToHave.map(text => ({ text, required: false })),
         ]
+        // Fresh seed per click: near-tied entries/bullets may swap between
+        // generations, so regenerating explores the tie space. Clearly-better
+        // entries always win — the jitter is bounded server-side.
+        const seed = crypto.getRandomValues(new Uint32Array(1))[0]
         const res = await fetch('/api/retrieve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requirements }),
+          body: JSON.stringify({ requirements, seed }),
         })
         if (res.ok) {
           retrievalResult = await res.json() as RetrievalResult
@@ -198,7 +211,9 @@ export default function Generate() {
         for await (const chunk of streamCompletion({
           endpoint: settings.llamaEndpoint, model: settings.modelName,
           messages: [{ role: 'user', content: buildShortlistMessage({ jobs, education, projects, skills }, retrievalResult, jdKeywords) }],
-          temperature: 0.1, maxTokens: 256,
+          // noThink for the same reason as extraction: reasoning would eat
+          // this small budget before any JSON appeared.
+          temperature: 0.1, maxTokens: 256, noThink: true,
           system: SHORTLIST_SYSTEM_PROMPT,
         })) { selText += chunk }
         const { jobIds, projectIds } = parseShortlist(
@@ -241,7 +256,7 @@ export default function Generate() {
     const eduLines = buildEducationLines(education)
     const staticPrefix = [header, eduLines].filter(Boolean).map(s => s + '\n').join('')
 
-    const runGeneration = async (selJobs: Job[], selProjects: Project[], bulletBonus: number): Promise<string> => {
+    const runGeneration = async (selJobs: Job[], selProjects: Project[], bulletBonus: number): Promise<{ final: string; rawBody: string }> => {
       setOutput(staticPrefix)
       let raw = staticPrefix
       let final = ''
@@ -264,7 +279,9 @@ export default function Generate() {
         final = assembleResume(header, eduLines, raw.slice(staticPrefix.length))
         setOutput(final)
       }
-      return final
+      // rawBody keeps the model's citations — assembleResume strips them, and
+      // the lint pass needs both views.
+      return { final, rawBody: raw.slice(staticPrefix.length) }
     }
 
     // One entry from the ranked pool, mirroring expandToPageFit's preference
@@ -285,14 +302,15 @@ export default function Generate() {
       setPhase('generating')
       let selJobs = selectedJobs
       let selProjects = selectedProjects
-      const text = await runGeneration(selJobs, selProjects, 0)
+      let bonusUsed = 0
+      let current = await runGeneration(selJobs, selProjects, 0)
 
       // ── Dynamic fill: measure the REAL compiled page, not the estimate. ────
       // If meaningfully short and more ranked content exists (or caps aren't
       // binding), add the next entry and regenerate once with the measured
       // shortfall folded into the bullet target.
-      if (text && retrievalResult) {
-        const fill = await fetchPageFill(text)
+      if (current.final && retrievalResult) {
+        const fill = await fetchPageFill(current.final)
         if (fill !== null && fill < 90) {
           // usable page ≈ 45 bullet-heights; convert missing % into bullets
           const deficitBullets = Math.ceil(((97 - fill) / 100) * 45)
@@ -303,8 +321,60 @@ export default function Generate() {
             setPhase('filling')
             selJobs = grown.jobs
             selProjects = grown.projects
-            await runGeneration(selJobs, selProjects, deficitBullets)
+            bonusUsed = deficitBullets
+            current = await runGeneration(selJobs, selProjects, deficitBullets)
           }
+        }
+      }
+
+      // ── Reflection: code-verified checks, one targeted auto-fix, scoring ───
+      // The critic is deterministic (lint + embeddings); the model only
+      // executes fixes it is handed, through the refine edit contract. The
+      // repass preserves the draft's bullet count by contract, so page fill
+      // is not re-measured. Best-effort: a reflection failure must never
+      // cost a good generation.
+      if (current.final && jdKeywords && runId === runSeq.current) {
+        try {
+          setPhase('reflecting')
+          const selData: ResumeData = { jobs: selJobs, education, projects: selProjects, skills }
+          const allocation = computeBulletAllocation(selData, retrievalResult, hasSummary, bonusUsed)
+          const lintBefore = runLint({
+            rawBody: current.rawBody, final: current.final, data: selData,
+            retrieval: retrievalResult, keywords: jdKeywords, allocation, requireCitations: true,
+          })
+          let lint = lintBefore
+          let fixed: LintIssue[] = []
+          let repassRan = false
+          let repassFailed = false
+          if (lintBefore.hard.length > 0) {
+            setPhase('repassing')
+            const fullData: ResumeData = { jobs, education, projects, skills }
+            const result = await runRefine({
+              instructions: buildLintInstruction(lintBefore.hard),
+              snapshot: current.final,
+              data: fullData,
+              keywords: jdKeywords,
+              retrieval: retrievalResult,
+            })
+            repassRan = true
+            if (result) {
+              current = result
+              // Refine legitimately leaves copied bullets uncited, and its
+              // prompt numbers sources over the full profile — re-lint with
+              // matching expectations. One repass max, structurally.
+              lint = runLint({
+                rawBody: result.rawBody, final: result.final, data: fullData,
+                retrieval: retrievalResult, keywords: jdKeywords, allocation, requireCitations: false,
+              })
+              fixed = lintBefore.hard.filter(h => !lint.issues.some(i => i.kind === h.kind && i.message === h.message))
+            } else {
+              repassFailed = true
+            }
+          }
+          const score = await fetchScore(current.final, jdKeywords)
+          if (runId === runSeq.current) setReflection({ lint, fixed, score, repassRan, repassFailed })
+        } catch {
+          // reflection is advisory — keep the generated resume regardless
         }
       }
     } catch (e) {
@@ -317,24 +387,25 @@ export default function Generate() {
     }
   }
 
-  async function refine() {
-    if (!output.trim()) return
-    if (!jobDescription.trim()) { setError('Job description required to refine.'); return }
-    setError(''); setJustSaved(false); setLoading(true); setStreaming(true)
-    const snapshot = output
+  // Parameter-driven refine core, shared by the Refine button and the
+  // reflection auto-repass. Reads NO component state that generate() sets
+  // mid-flight (fresh state isn't re-rendered into this closure yet) —
+  // everything arrives as arguments. Returns null on error, snapshot restored.
+  async function runRefine(args: {
+    instructions: string
+    snapshot: string
+    data: ResumeData
+    keywords: JdKeywords | null
+    retrieval: RetrievalResult | null
+  }): Promise<{ final: string; rawBody: string } | null> {
     const header = buildHeaderLines(profile)
-    const eduLines = buildEducationLines(education)
+    const eduLines = buildEducationLines(args.data.education)
     const staticPrefix = [header, eduLines].filter(Boolean).map(s => s + '\n').join('')
     setOutput(staticPrefix)
+    let raw = staticPrefix
     try {
       const userMessage = buildRefineMessage(
-        { jobs, education, projects, skills },
-        profile,
-        jobDescription,
-        snapshot,
-        refineInstructions,
-        keywords,
-        retrieval,
+        args.data, profile, jobDescription, args.snapshot, args.instructions, args.keywords, args.retrieval,
       )
       const gen = streamCompletion({
         endpoint: settings.llamaEndpoint, model: settings.modelName,
@@ -344,17 +415,36 @@ export default function Generate() {
         temperature: Math.min(settings.temperature, 0.3), maxTokens: settings.maxTokens,
         system: REFINE_SYSTEM_PROMPT,
       })
-      for await (const chunk of gen) setOutput(prev => prev + chunk)
+      for await (const chunk of gen) {
+        raw += chunk
+        setOutput(prev => prev + chunk)
+      }
+      const rawBody = raw.slice(staticPrefix.length)
+      const final = assembleResume(header, eduLines, rawBody)
+      setOutput(final)
+      return { final, rawBody }
     } catch (e) {
-      setOutput(snapshot)
+      setOutput(args.snapshot)
       setError(e instanceof Error ? e.message : 'Failed to connect to model server.')
       setConnected(false)
-    } finally {
-      setOutput(prev => {
-        if (prev === snapshot) return prev // errored — snapshot restored above, leave it untouched
-        const body = prev.startsWith(staticPrefix) ? prev.slice(staticPrefix.length) : prev
-        return assembleResume(header, eduLines, body)
+      return null
+    }
+  }
+
+  async function refine() {
+    if (!output.trim()) return
+    if (!jobDescription.trim()) { setError('Job description required to refine.'); return }
+    setError(''); setJustSaved(false); setLoading(true); setStreaming(true)
+    setReflection(null) // a manual edit invalidates the panel's verdicts
+    try {
+      await runRefine({
+        instructions: refineInstructions,
+        snapshot: output,
+        data: { jobs, education, projects, skills },
+        keywords,
+        retrieval,
       })
+    } finally {
       setLoading(false)
       setStreaming(false)
     }
@@ -378,6 +468,31 @@ export default function Generate() {
       await res.blob()
       const fill = res.headers.get('X-Appchef-Fill')
       return fill ? parseInt(fill, 10) : null
+    } catch {
+      return null
+    }
+  }
+
+  // Semantic requirement coverage of the final text — feeds the reflection
+  // panel; non-fatal on any failure.
+  async function fetchScore(content: string, kw: JdKeywords): Promise<ScoreResult | null> {
+    try {
+      const bullets = content.split('\n')
+        .filter(l => l.startsWith('[BULLET]') || l.startsWith('[SUMMARY]'))
+        .map(l => l.replace(/^\[(?:BULLET|SUMMARY)\]/, '').trim())
+        .filter(Boolean)
+      const requirements: RequirementInput[] = [
+        ...kw.mustHave.map(text => ({ text, required: true })),
+        ...kw.niceToHave.map(text => ({ text, required: false })),
+      ]
+      if (bullets.length === 0 || requirements.length === 0) return null
+      const res = await fetch('/api/score', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bullets, requirements }),
+      })
+      if (!res.ok) return null
+      return await res.json() as ScoreResult
     } catch {
       return null
     }
@@ -486,6 +601,8 @@ export default function Generate() {
                 : phase === 'scoring' ? 'Scoring…'
                 : phase === 'shortlisting' ? 'Selecting…'
                 : phase === 'filling' ? 'Filling…'
+                : phase === 'reflecting' ? 'Reviewing…'
+                : phase === 'repassing' ? 'Fixing…'
                 : 'Generating…'
                 : 'Generate Resume'}
               {!loading && <ChevronRight size={13} />}
@@ -498,6 +615,8 @@ export default function Generate() {
                 {phase === 'extracting' ? 'Reading job requirements…'
                   : phase === 'scoring' ? 'Scoring your experience against the posting…'
                   : phase === 'filling' ? 'Page has room — adding more of your experience…'
+                  : phase === 'reflecting' ? 'Checking the draft against the job requirements…'
+                  : phase === 'repassing' ? 'Auto-fixing flagged issues…'
                   : 'Choosing the strongest entries…'}
               </p>
             )}
@@ -586,6 +705,7 @@ export default function Generate() {
                   </p>
                 </div>
               )}
+              {reflection && !streaming && <ReflectionPanel reflection={reflection} />}
               {!streaming && (
                 <div className="mt-4 pt-4 border-t border-zinc-800/60">
                   <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Refine</p>

@@ -1,4 +1,4 @@
-import type { Job, EducationEntry, Project, Skill, Profile, RetrievalResult } from './types'
+import type { BulletAllocation, EducationEntry, Job, Profile, Project, RetrievalResult, Skill } from './types'
 
 export const EXTRACTION_SYSTEM_PROMPT = `You are a job-posting analyst. Extract the posting's target title and priority requirements. Return ONLY a valid JSON object — no explanation, no preamble, no markdown fences.`
 
@@ -13,6 +13,10 @@ export interface JdKeywords {
   niceToHave: string[]
 }
 
+// Single source of truth for the verb ban — interpolated into both system
+// prompts and enforced post-generation by src/lib/lint.ts.
+export const BANNED_VERBS = ['spearheaded', 'leveraged', 'championed', 'orchestrated', 'utilized'] as const
+
 export const SYSTEM_PROMPT = `You are an expert resume writer and career strategist. Produce a tailored, one-page resume using ONLY the exact tagged format below. Output nothing else — no preamble, no explanation, no markdown fences.
 
 OUTPUT FORMAT:
@@ -23,7 +27,7 @@ OUTPUT FORMAT:
 [JOB_CO]Company Name\tCity, State
 [JOB_ROLE]Job Title\tMon YYYY – Mon YYYY (e.g. "Jun 2022 – Present"; "Present" replaces the end date for a current role. Always include the start date)
 [BULLET]Achievement-focused bullet reframed from candidate's source data [S1]
-(minimum 2, maximum 3 bullets per job; WEIGHT BY RECENCY — the most recent role gets the most bullets and detail, and within this section an older entry must never have more bullets than a more recent one; most recent first; omit irrelevant jobs entirely rather than giving them fewer than 2 bullets)
+(minimum 2, maximum 3 bullets per job; BULLET COUNTS: when the user message provides a PER-ENTRY BULLET ALLOCATION, follow it exactly — it already balances relevance against recency; when none is provided, weight by recency: the most recent role gets the most bullets and detail, and an older entry never has more bullets than a more recent one; most recent first; omit irrelevant jobs entirely rather than giving them fewer than 2 bullets)
 
 [SECTION]PROJECTS
 [PROJECT]Project Name | Tech1, Tech2, Tech3\tMon YYYY – Mon YYYY
@@ -42,14 +46,14 @@ RULES:
 5. KEYWORDS — COVERAGE, NOT FREQUENCY: Mirror keywords and technical terms from the job description naturally and truthfully. Address each job requirement ONCE with evidence; never use any keyword more than twice across the entire resume. When a PRIORITY KEYWORDS list is provided: every must-have keyword the candidate's data genuinely supports must appear once in TECHNICAL SKILLS and once inside a [BULLET] (or [SUMMARY]) with supporting evidence. Skip keywords the candidate's data cannot support — never invent experience to cover a keyword.
 6. ACRONYMS: In TECHNICAL SKILLS, write the first mention of an acronym as the spelled-out form plus the acronym — "Amazon Web Services (AWS)", "Continuous Integration/Continuous Deployment (CI/CD)" — but only when you are certain of the standard expansion; otherwise keep the acronym alone. Everywhere else, use the same form the job description uses.
 7. ORDERING IS MANDATORY: every section must appear in strict reverse-chronological order by END DATE — most recent end date first. "Present" is the most recent possible end date. This cannot be changed for any reason, including relevance to the job. Recency weighting affects bullet count and detail, not the order entries appear. The candidate's entries are pre-sorted — output them in the EXACT ORDER they are provided.
-8. BULLET ORDER WITHIN AN ENTRY: order each entry's bullets by relevance to the target job, most relevant first. The FIRST bullet of the MOST RECENT job must address the job description's single most important requirement that the candidate's data supports — recruiters read that line first.
-9. VERB VARIETY: start each bullet with a concrete action verb; never reuse the same opening verb twice in the resume; prefer verbs drawn from the candidate's own source data. Do not use: spearheaded, leveraged, championed, orchestrated, utilized.
+8. BULLET ORDER WITHIN AN ENTRY: order each entry's bullets by relevance to the target job, most relevant first. The FIRST bullet of the MOST RECENT job must address the job description's single most important requirement that the candidate's data supports — recruiters read that line first. When an entry's profile data includes a "Most relevant to this JD" line, build that entry's bullets around those cited sources first.
+9. VERB VARIETY: start each bullet with a concrete action verb; never reuse the same opening verb twice in the resume; prefer verbs drawn from the candidate's own source data. Do not use: ${BANNED_VERBS.join(', ')}.
 10. The entire output must represent one page of content — be selective and concise but always use the full page.
 11. Never fabricate or exaggerate. Reframe truthfully to match the role.
 12. NEVER invent, modify, or estimate any date. Copy dates exactly as given in the candidate's profile data. If a date was not provided, omit it entirely rather than guessing.
 13. Copy job titles exactly as provided. Some titles include a market-standard form with the internal title in parentheses — keep both, unchanged.
 14. MINIMUM BULLETS: Every work experience entry and every project entry that appears in the resume MUST have at least 2 [BULLET] lines. If page space is tight, drop an entire entry rather than leaving any entry with only 1 bullet.
-15. BULLET CAP: No entry may have more than 3 bullets. AT MOST ONE entry in the entire resume may have 4 — and only when that entry is extremely relevant to the target role. The cap overrides the page-fill count.
+15. BULLET CAP: No entry may have more than 3 bullets. AT MOST ONE entry in the entire resume may have 4 — only the entry the PER-ENTRY BULLET ALLOCATION designates for 4, or, when no allocation is provided, only an entry extremely relevant to the target role. The cap overrides the page-fill count.
 16. PROJECTS PRESENCE: If PROJECTS entries are provided in the profile data, the PROJECTS section must appear with at least one project — two when space allows. Never drop the section entirely; drop an older job's bullet count or an older job before dropping the last project.`
 
 // Refine is an EDIT pass, not a second generation: the draft already went
@@ -72,7 +76,7 @@ RULES FOR LINES YOU CHANGE OR ADD (lines copied unchanged are exempt):
 4. BULLET COUNTS: every entry keeps at least 2 bullets and at most 3; at most ONE entry in the resume may have 4, and only when extremely relevant to the target role.
 5. Reverse-chronological order by end date is mandatory in every section — never reorder entries.
 6. PROJECTS: never remove the last remaining project — the section survives with at least one entry.
-7. Start each bullet with a concrete action verb; never reuse an opening verb twice in the resume. Do not use: spearheaded, leveraged, championed, orchestrated, utilized.`
+7. Start each bullet with a concrete action verb; never reuse an opening verb twice in the resume. Do not use: ${BANNED_VERBS.join(', ')}.`
 
 export interface ResumeData {
   jobs: Job[]
@@ -179,7 +183,7 @@ export function buildExtractionMessage(jobDescription: string): string {
     `---\n\n` +
     `EXTRACTION RULES:\n` +
     `1. targetTitle: the posting's job title as a standard market title (e.g. "Senior Software Engineer").\n` +
-    `2. mustHave: up to 12 hard skills, tools, platforms, certifications, or methodologies that are explicitly required, sit in the requirements/qualifications section, or repeat across the posting. Copy the posting's EXACT phrasing (keep "React.js" as "React.js") — do not paraphrase. Treat "preferred" qualifications as required.\n` +
+    `2. mustHave: up to 12 hard skills, tools, platforms, certifications, or methodologies that are explicitly required, sit in the requirements/qualifications section, or repeat across the posting. Copy the posting's EXACT phrasing (keep "React.js" as "React.js") — do not paraphrase. Treat "preferred" qualifications as required. Each item must be a SHORT skill term (1–4 words): extract "Python" from "strong Python engineering background in production systems" and "data pipelines" from "designing and operating data pipelines at scale" — never a whole requirement sentence.\n` +
     `3. niceToHave: up to 8 secondary or bonus terms.\n` +
     `4. Never include soft-skill filler ("team player", "fast-paced environment", "communication", "detail-oriented").\n\n` +
     `Return ONLY this JSON:\n` +
@@ -372,7 +376,26 @@ function groupSkillsByCategory(skills: Skill[]): Record<string, string[]> {
   }, {})
 }
 
-function buildProfileContext(data: ResumeData, profile: Profile | null): string {
+// Resolves an entry's top-ranked bullets (retrieval's jittered + MMR order)
+// to the [S#] labels assigned in the numbering loop. Annotation instead of
+// reordering: numberedSourceMap and buildProfileContext number independently,
+// and reordering the source bullets would silently desync citations.
+function topRelevantLine(
+  retrieval: RetrievalResult | null,
+  parentId: string,
+  labelByText: Map<string, string>,
+): string | undefined {
+  const ranked = retrieval?.bulletRanks?.[parentId]
+  if (!ranked || ranked.length === 0) return undefined
+  const labels = ranked
+    .filter(b => b.score > 0)
+    .map(b => labelByText.get(b.text.trim()))
+    .filter((s): s is string => Boolean(s))
+    .slice(0, 3)
+  return labels.length > 0 ? `Most relevant to this JD: [${labels.join('], [')}]` : undefined
+}
+
+function buildProfileContext(data: ResumeData, profile: Profile | null, retrieval: RetrievalResult | null = null): string {
   const { jobs, projects, skills } = data
   const sections: string[] = []
   let sourceIdx = 1
@@ -400,11 +423,17 @@ function buildProfileContext(data: ResumeData, profile: Profile | null): string 
         const bulletLines = j.bullets?.trim()
           ? j.bullets.split('\n').map(l => l.trim()).filter(Boolean)
           : []
-        const numberedBullets = bulletLines.map(l => `[S${sourceIdx++}] ${l}`).join('\n')
+        const labelByText = new Map<string, string>()
+        const numberedBullets = bulletLines.map(l => {
+          const label = `S${sourceIdx++}`
+          if (!labelByText.has(l)) labelByText.set(l, label)
+          return `[${label}] ${l}`
+        }).join('\n')
         return [
           `[#${i + 1}] ${resumeTitle(j)} at ${j.company}${loc} (${dates})${tag}`,
           j.description && `Description: ${j.description}`,
           numberedBullets || undefined,
+          topRelevantLine(retrieval, j.id, labelByText),
         ].filter(Boolean).join('\n')
       }).join('\n\n')
     )
@@ -425,11 +454,17 @@ function buildProfileContext(data: ResumeData, profile: Profile | null): string 
         const bulletLines = p.bullets?.trim()
           ? p.bullets.split('\n').map(l => l.trim()).filter(Boolean)
           : []
-        const numberedBullets = bulletLines.map(l => `[S${sourceIdx++}] ${l}`).join('\n')
+        const labelByText = new Map<string, string>()
+        const numberedBullets = bulletLines.map(l => {
+          const label = `S${sourceIdx++}`
+          if (!labelByText.has(l)) labelByText.set(l, label)
+          return `[${label}] ${l}`
+        }).join('\n')
         return [
           `[#${i + 1}] ${p.name}${dates}${tech}${url}`,
           p.description && `Description: ${p.description}`,
           numberedBullets || undefined,
+          topRelevantLine(retrieval, p.id, labelByText),
         ].filter(Boolean).join('\n')
       }).join('\n\n')
     )
@@ -466,7 +501,79 @@ export function pageFillCount(data: ResumeData, hasSummary: boolean, bulletBonus
   return Math.max(Math.min(budget + bulletBonus, capped), minRequired)
 }
 
-function pageFillInstruction(data: ResumeData, hasSummary: boolean, bulletBonus = 0): string {
+// ─── Relevance-driven bullet allocation ──────────────────────────────────────
+// Explicit per-entry bullet counts for the generation prompt: every entry gets
+// 2, extras flow by retrieval rank (recency and job-before-project only break
+// ties), the most recent job takes the first extra so the top of the page
+// never looks thin, and the single rule-15 fourth bullet goes to the
+// top-ranked entry when the budget allows. Replaces "allocate top-down by
+// recency", which gave every JD the same page shape. Null without retrieval —
+// the recency fallback keeps today's prompt wording.
+export function computeBulletAllocation(
+  data: ResumeData,
+  retrieval: RetrievalResult | null,
+  hasSummary: boolean,
+  bulletBonus = 0,
+): BulletAllocation | null {
+  if (!retrieval) return null
+  const jobScore = new Map(retrieval.rankedJobs.map(r => [r.id, r.score]))
+  const projScore = new Map(retrieval.rankedProjects.map(r => [r.id, r.score]))
+  const entries = [
+    ...sortByRecency(data.jobs).map(j => ({
+      id: j.id,
+      kind: 'job' as const,
+      label: `${resumeTitle(j)} at ${j.company}`,
+      count: 2,
+      score: jobScore.get(j.id) ?? 0,
+      end: j.current ? '9999-12' : (j.endDate || ''),
+    })),
+    ...sortProjectsByRecency(data.projects).map(p => ({
+      id: p.id,
+      kind: 'project' as const,
+      label: p.name,
+      count: 2,
+      score: projScore.get(p.id) ?? 0,
+      end: p.endDate || '9999-12',
+    })),
+  ]
+  if (entries.length === 0) return null
+  // Priority: score desc → more recent end first → job before project.
+  const priority = [...entries].sort((a, b) =>
+    (b.score - a.score)
+    || b.end.localeCompare(a.end)
+    || (a.kind === b.kind ? 0 : a.kind === 'job' ? -1 : 1))
+  const total = pageFillCount(data, hasSummary, bulletBonus)
+  // pageFillCount guarantees 2n ≤ total ≤ 3n+1; clamp defensively anyway.
+  let extras = Math.max(0, Math.min(total - 2 * entries.length, entries.length + 1))
+  const recentJob = entries.find(e => e.kind === 'job')
+  if (extras > 0 && recentJob) {
+    recentJob.count = 3
+    extras--
+  }
+  for (const e of priority) {
+    if (extras === 0) break
+    if (e.count < 3) {
+      e.count = 3
+      extras--
+    }
+  }
+  if (extras > 0) priority[0].count = 4 // the single rule-15 slot, by relevance
+  return {
+    entries: entries.map(({ id, kind, label, count }) => ({ id, kind, label, count })),
+    total: entries.reduce((a, e) => a + e.count, 0),
+  }
+}
+
+function pageFillInstruction(data: ResumeData, hasSummary: boolean, bulletBonus = 0, allocation: BulletAllocation | null = null): string {
+  if (allocation) {
+    return (
+      `PAGE FILL REQUIREMENT: this resume has space for exactly ${allocation.total} bullet points ` +
+      `across all work experience and project entries combined — no more (it will overflow the page).\n` +
+      `PER-ENTRY BULLET ALLOCATION (already balanced for relevance to THIS job and for recency — follow it exactly):\n` +
+      allocation.entries.map(e => `- ${e.label}: ${e.count} bullets`).join('\n') +
+      `\nEvery listed entry must appear with exactly its allocated bullet count.`
+    )
+  }
   const effective = pageFillCount(data, hasSummary, bulletBonus)
   return (
     `PAGE FILL REQUIREMENT: Based on the layout, this resume has space for exactly ${effective} bullet points ` +
@@ -545,7 +652,7 @@ export function assembleResume(header: string, education: string, modelOutput: s
 // Mirrors the [S#] numbering that buildProfileContext assigns to bullet lines
 // (jobs by recency, then projects by recency, one counter). Keep the two in
 // sync — the evidence map cites these numbers.
-function numberedSourceMap(data: ResumeData): Map<string, string> {
+export function numberedSourceMap(data: ResumeData): Map<string, string> {
   const map = new Map<string, string>()
   let sourceIdx = 1
   for (const j of sortByRecency(data.jobs)) {
@@ -614,15 +721,16 @@ export function buildUserMessage(
   retrieval: RetrievalResult | null = null,
   bulletBonus = 0,
 ): string {
-  const profileContext = buildProfileContext(data, profile)
+  const profileContext = buildProfileContext(data, profile, retrieval)
   const hasSummary = Boolean(profile?.summary?.trim())
+  const allocation = computeBulletAllocation(data, retrieval, hasSummary, bulletBonus)
   return (
     `Here is the candidate's full profile:\n\n${profileContext}\n\n` +
     `---\n\nTarget job description:\n\n${jobDescription}\n\n` +
     `---\n\n` +
     keywordsBlock(keywords) +
     evidenceBlock(data, retrieval) +
-    `${pageFillInstruction(data, hasSummary, bulletBonus)}\n\n` +
+    `${pageFillInstruction(data, hasSummary, bulletBonus, allocation)}\n\n` +
     `Write the tailored resume in the exact tagged format specified.`
   )
 }

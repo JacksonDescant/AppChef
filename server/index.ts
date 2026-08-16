@@ -10,6 +10,7 @@ import { eq, getTableColumns } from 'drizzle-orm'
 import { indexStatus, reindexChunks, scheduleEmbedding, scheduleReindex } from './chunks'
 import { ensureEmbeddings } from './embeddings'
 import { retrieve } from './retrieval'
+import { scoreResume } from './score'
 import type { RequirementInput } from '../src/types'
 
 const app = express()
@@ -64,20 +65,45 @@ crudRoutes(router, '/target-jobs', targetJobs)
 // ─── Retrieval (docs/retrieval-research.md) ─────────────────────────────────
 
 router.post('/retrieve', (req, res) => {
-  const raw = (req.body as { requirements?: unknown })?.requirements
+  const body = req.body as { requirements?: unknown; seed?: unknown }
+  const raw = body?.requirements
   const requirements: RequirementInput[] = Array.isArray(raw)
     ? (raw as RequirementInput[])
         .filter(r => typeof r?.text === 'string' && r.text.trim())
         .map(r => ({ text: r.text.trim().slice(0, 200), required: Boolean(r.required) }))
         .slice(0, 30)
     : []
-  retrieve(requirements)
+  // Optional per-click seed enables near-tie jitter; absent ⇒ deterministic.
+  const seed = typeof body?.seed === 'number' && Number.isFinite(body.seed) ? body.seed >>> 0 : null
+  retrieve(requirements, seed)
     .then(result => res.json(result))
     .catch((e: Error) => res.status(500).json({ error: e.message }))
 })
 
 router.get('/retrieval-status', (_req, res) => {
   res.json(indexStatus())
+})
+
+// Scores the GENERATED resume's prose lines against the JD requirements —
+// feeds the reflection panel; never gates generation.
+router.post('/score', (req, res) => {
+  const body = req.body as { bullets?: unknown; requirements?: unknown }
+  const bullets = Array.isArray(body?.bullets)
+    ? (body.bullets as unknown[])
+        .filter((b): b is string => typeof b === 'string' && Boolean(b.trim()))
+        .map(b => b.trim().slice(0, 300))
+        .slice(0, 40)
+    : []
+  const rawReqs = body?.requirements
+  const requirements: RequirementInput[] = Array.isArray(rawReqs)
+    ? (rawReqs as RequirementInput[])
+        .filter(r => typeof r?.text === 'string' && r.text.trim())
+        .map(r => ({ text: r.text.trim().slice(0, 200), required: Boolean(r.required) }))
+        .slice(0, 30)
+    : []
+  scoreResume(bullets, requirements)
+    .then(result => res.json(result))
+    .catch((e: Error) => res.status(500).json({ error: e.message }))
 })
 
 // ─── Applications (with CSV export) ─────────────────────────────────────────

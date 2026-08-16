@@ -20,14 +20,19 @@ export interface CoverageReport {
   mustHavePct: number | null
 }
 
-// Word-boundary test that survives non-word tech terms ("C++", "React.js",
+// Word-boundary regex that survives non-word tech terms ("C++", "React.js",
 // ".NET"): the match must not be flanked by letters or digits, so "Java"
-// doesn't hit "JavaScript" but "C++" and "CI/CD" still match.
-function containsKeyword(haystack: string, keyword: string): boolean {
+// doesn't hit "JavaScript" but "C++" and "CI/CD" still match. Shared with
+// lint (src/lib/lint.ts) and output scoring (server/score.ts).
+export function keywordRegex(keyword: string, flags = 'i'): RegExp | null {
   const escaped = keyword.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  if (!escaped) return false
-  const re = new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, 'i')
-  return re.test(haystack)
+  if (!escaped) return null
+  return new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, flags)
+}
+
+function containsKeyword(haystack: string, keyword: string): boolean {
+  const re = keywordRegex(keyword)
+  return re ? re.test(haystack) : false
 }
 
 export function computeCoverage(taggedResume: string, keywords: JdKeywords): CoverageReport {
